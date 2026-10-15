@@ -153,17 +153,23 @@ cd D:\work\TorsionFlow\torsional-diffusion
 `evaluate_confs.py` prints a block per threshold. **Read the `threshold 0.5` block.**
 Compare with the RDKit row.
 
-## 2b. Their trained model, if the Drive has one for QM9
+## 2b. Their trained model, through our setup
 
-Check whether the Drive's `workdir` folder contains a QM9 model (for example
-`qm9_default`). If it does, put it in `torsional-diffusion\workdir\` and:
+The authors' Drive has their QM9 model (`workdir/qm9_default`, 6.4 MB). One command
+downloads it, generates with their own sampler in 1, 2, 5 and 20 steps plus plain RDKit,
+and scores everything with `evaluate_confs.py` on this machine's RDKit:
 
 ```powershell
-..\.venv\Scripts\python.exe generate_confs.py --test_csv data/QM9/test_smiles.csv --inference_steps 20 --model_dir workdir/qm9_default --out workdir/qm9_default/qm9_20steps.pkl --tqdm --batch_size 128 --no_energy
-..\.venv\Scripts\python.exe evaluate_confs.py --confs workdir/qm9_default/qm9_20steps.pkl --test_csv data/QM9/test_smiles.csv --true_mols data/QM9/test_mols.pkl --dataset qm9 --n_workers 8
+cd D:\work\TACFM\TorsionFlow
+.\.venv\Scripts\python.exe step2_reproduceun_td_checkpoint.py
 ```
 
-Compare the `threshold 0.5` block with the Torsional Diffusion row.
+Results: `runs	d_qm9_default\`. This is the fair comparison for the flow model
+(same RDKit, same embedding failures, same scoring).
+
+Note: their QM9 model uses `use_second_order_repr: true` (see its
+`model_parameters.yml`); `train.py`'s default and our flow notebook use `false`, a
+smaller network.
 
 ## 2c. Train it ourselves
 
