@@ -99,6 +99,22 @@ Each step has a pass condition. Do not start the next step until it passes.
       learning the real task. On CPU (up to 6000 steps) the loss stays at
       "predict 0" (3.29) although 0.48 is possible; Torsional Diffusion's own
       training behaves the same early on. Needs the full run on the GPU.
+      *First GPU result (2026-10-15, mid-training checkpoint, epoch 80+ of 250,
+      `score_checkpoint.py`, first 100 test molecules):* it learns. AMR-R 0.164 at 20
+      steps vs RDKit 0.237 on the same molecules (paper, all 1000: RDKit 0.235, TD 0.178).
+      Step curve, AMR-R / AMR-P: 1 step 0.200 / 0.256, 2 steps 0.190 / 0.248, 5 steps
+      0.170 / 0.216, 20 steps 0.164 / 0.201 (RDKit 0.237 / 0.204). 6 of 100 molecules
+      fail RDKit embedding (same in every row, counted as 0 coverage).
+      *Final (2026-10-16, epoch 250, all 1000 test molecules):* COV-R / AMR-R / COV-P / AMR-P:
+      random twists 82.71 / 0.248 / 73.31 / 0.323; 1 step 83.78 / 0.236 / 77.34 / 0.296;
+      2 steps 85.93 / 0.208 / 80.29 / 0.266; 5 steps 86.86 / 0.188 / 81.95 / 0.240;
+      20 steps 86.83 / 0.182 / 82.45 / 0.230 (paper TD 92.8 / 0.178 / 92.7 / 0.221).
+      Validation loss flat from ~epoch 100 (2.31 at the end). AMR-R is within 0.004 A of
+      TD. COV is not comparable yet: RDKit 2026.09 fails to embed 81 test molecules
+      (strained cages with several stereocentres; `enforceChirality=False` rescues 76), and
+      those count as 0 coverage. TD's 92.8 COV-R is impossible with that many failures, so
+      the paper's RDKit must have embedded more of them. Fair comparison: run TD's own
+      checkpoint through this same pipeline.
       *Pass:* the 20-step model comes close to Torsional Diffusion's AMR-R 0.178.
       If the loss hasn't moved after ~10 full epochs, give the network the twist
       angles as explicit inputs.
