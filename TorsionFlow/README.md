@@ -41,6 +41,8 @@ training and few-step sampler. `MODE = "smoke"` checks every piece on a CPU in
 ~3 minutes; `MODE = "full"` is the real run and needs the GPU. Built in checks: the
 path lands back to ~1e-7 Å, the lowest possible loss (0.48 vs 3.29 for "predict 0"),
 a memorisation test proving the network can learn, and validation error by time.
+`score_checkpoint.py` scores the current `best_model.pt` on the first 100 test molecules
+(next to RDKit on the same molecules) from a second terminal while training continues.
 
 **The explainer:** `notebooks/training_walkthrough.ipynb` walks through the whole training procedure,
 one cell at a time: data, rotatable bonds, conformer matching, the curved path,
