@@ -1,0 +1,232 @@
+RESEARCH GAPS AND FINDINGS - TorsionFlow / TACFM project
+Last updated: 2026-10-18
+
+Contents
+  1. The short version
+  2. The main research question (fake vs real multiple answers)
+  3. Why it is a gap: what each paper does and leaves open
+  4. The question list, with status and results so far
+  5. Contributions we could claim
+  6. Other gaps found along the way (molecules)
+  7. Earlier gaps from the graph work (Codes/SBM)
+  8. Corrections to things said earlier
+  9. Paper list (files in this folder + links)
+
+======================================================================
+1. THE SHORT VERSION
+======================================================================
+
+- Combination gap: nobody has done 1-2 step conformer generation on the
+  curved twist-angle (torsion) path. Every ingredient exists separately:
+    curved path but slow ........ Torsional Diffusion (20 steps), GO-Flow (50)
+    few-step but straight x,y,z . AvgFlow, EC-Conf, EnFlow (1-2 steps)
+    few-step on tori, not molecules  RCM, Generalised Flow Maps
+    torsional flow matching, other tasks  FlowPacker (side chains), MOFFlow-2
+- Our multi-step twist-angle flow model (20 steps) already matches
+  Torsional Diffusion's accuracy on GEOM-QM9 (AMR-R 0.182 vs 0.178).
+- At 1 step it is barely better than random twists (AMR-R 0.236 vs 0.248).
+  That 1-step gap is the open problem, and on QM9 it comes almost entirely
+  from REAL multiple answers, not symmetry.
+
+======================================================================
+2. THE MAIN RESEARCH QUESTION
+======================================================================
+
+  When a few-step model fails on twist angles, how much of the failure
+  comes from FAKE multiple answers and how much from REAL ones? Does
+  removing the fake part make 1-2 step generation work?
+
+Why 1-step fails at all: when one in-between shape can lead to several
+correct final shapes, the model learns their AVERAGE, and one big jump lands
+between them (a shape that is none of them).
+
+Two kinds of "several correct answers":
+
+  FAKE  Symmetric groups. A CH3 group looks identical every 120 degrees, so
+        0, 120 and 240 are the SAME molecule. Also CF3, tert-butyl (120),
+        phenyl rings and nitro groups (180).
+        Fix: free and exact. Measure that twist modulo 360/k degrees.
+        Detail: symmetry from both ends of a bond combines (a 3-fold group
+        on one side and a 2-fold on the other repeats every 60 degrees).
+
+  REAL  Genuinely different shapes, e.g. butane's anti (180) vs gauche (+-60).
+        Fix: the model must learn to pick one -> few-step methods
+        (Reflow, consistency, distillation, better pairing of noise and data).
+
+======================================================================
+3. WHY IT IS A GAP
+======================================================================
+
+  Work                        Handles                          Leaves open
+  --------------------------  -------------------------------  ---------------------------------
+  AvgFlow, SymDrift           symmetry of rotating the WHOLE   symmetric groups INSIDE the molecule
+                              molecule (SymDrift: for 1 step)
+  Torsional Diffusion         nothing (checked their code:     a CH3 is treated as 3 different answers
+                              every twist is a full 360)
+  RCM                         wrap-around at +-180             both kinds of multiple answers
+  "Flows straight but not     GUESSES Reflow helps most with   cannot tell fake modes from real ones
+   so fast" (Reflow)          many modes, never tests it
+  SubFlow                     real modes (images only)         no geometry, no symmetry
+  TorsionNet (2020)           lists CH3 symmetry as FUTURE     still open
+                              WORK
+
+======================================================================
+4. THE QUESTIONS, WITH STATUS
+======================================================================
+
+Q1  Fake vs real: what share of the ambiguity is fake?           ANSWERED
+    Toy notebook: 42% fake at the start of generation, 81% of that from CH3.
+    All of GEOM-QM9 (108,563 molecules, no training; step3_probe/):
+      - 30% of the ambiguity is fake, but 98.6% of that comes from
+        hydrogen-only groups (CH3, OH...). The benchmark ignores hydrogens.
+      - Counting only twists that move heavy atoms: 0.8% fake.
+      - Only 2.3% of QM9 molecules have a heavy-atom symmetric group
+        (inside those molecules, 38% of the ambiguity is fake).
+      - Boltzmann weighting gives the same answer.
+    => On QM9 the 1-step problem is almost all REAL multiple answers.
+
+Q2  Does the symmetry fix help?                                   ANSWERED (toy)
+    Toy, 5 seeds, exactly repeatable runs:
+      - Molecules with heavy-atom symmetric groups: better at 1-2 steps
+        (about 0.025-0.035 A AMR-R, 8-12%, 4-5 of 5 seeds).
+      - Fixing CH3 groups too made plain chains WORSE at 1-2 steps
+        (+0.025 A at 1 step, every seed).
+      - Best version: fix heavy-atom groups only (keeps the gain, halves the
+        cost; the rest of the cost comes through the shared network).
+    On QM9 it cannot move scores much (Q1). It could matter on GEOM-Drugs
+    (phenyl rings, CF3 common). Drugs deferred for now.
+
+Q3  Which few-step method fixes the REAL part best on twist       NOT STARTED
+    angles: Reflow, consistency (RCM-style, wrapped distance),     (step 6; the
+    or distillation? Also tests the "straight but not so fast"     main next
+    paper's untested guess.                                        target)
+
+Q4  Can a cheap probe (spread of possible destinations at the     NOT STARTED
+    start) predict few-step success before training?
+
+Q5  Can 1-2 steps match Torsional Diffusion's 20-step quality?    MEASURED: NOT YET
+    Our flow model, GPU run, all 1000 GEOM-QM9 test molecules, 0.5 A:
+                                 COV-R  AMR-R  COV-P  AMR-P
+      random twists (no model)   82.71  0.248  73.31  0.323
+      ours, 1 step               83.78  0.236  77.34  0.296
+      ours, 2 steps              85.93  0.208  80.29  0.266
+      ours, 5 steps              86.86  0.188  81.95  0.240
+      ours, 20 steps             86.83  0.182  82.45  0.230
+      paper: RDKit               85.10  0.235  86.80  0.232
+      paper: Torsional Diff. 20  92.80  0.178  92.70  0.221
+    Caveats: RDKit 2026.09 cannot embed ~8.6% of test molecules (strained
+    cages with several stereocentres) and those count as 0 coverage, so COV
+    is not comparable with the paper yet. Their QM9 model also uses the
+    richer "second order" network; ours used the simpler one.
+    Next: step2_reproduce/run_td_checkpoint.py scores the authors' model
+    on the same machine (fair head-to-head, and their 1-2 step numbers,
+    which the paper never reported).
+
+Q6  Loss: measure error in angles or in 3D atom positions?         NOT STARTED
+                                                                   (step 5)
+
+Q7  Twist angles vs straight x,y,z at 1-2 steps                    LATER
+    (vs AvgFlow, EC-Conf). Fair test only on GEOM-Drugs.
+
+======================================================================
+5. CONTRIBUTIONS WE COULD CLAIM
+======================================================================
+
+  1  First measured split of few-step failure into symmetry (fake) vs
+     genuine (real) multiple answers, on twist angles ......... have the data
+  2  Symmetry-aware twist-angle flow: the INTERNAL version of what AvgFlow
+     and SymDrift do for whole-molecule rotation .............. works on toy;
+                                                                needs Drugs
+  3  A cheap probe that predicts few-step success before training . not started
+  4  Controlled study: few-step methods x symmetry fix x loss, with
+     training speed measured .................................. not started
+  5  Torsional Diffusion running on Windows with current libraries, incl.
+     a fix for a Windows bug that would put 784 of 1000 test molecules
+     into training ............................................ done
+
+Warning: the symmetry trick alone is simple; a reviewer may call it obvious.
+The contribution has to be the measured split and which method fixes which
+part.
+
+======================================================================
+6. OTHER GAPS FOUND ALONG THE WAY (molecules)
+======================================================================
+
+- Curved vs straight at few steps (Q7). Only a fair test on GEOM-Drugs.
+- A geometry audit: take published conformer methods and isolate whether
+  the torus geometry is what actually helps.
+- Wrap-around matters: RCM showed consistency training that ignores
+  wrap-around falls apart on high-dimensional tori (error 35.16 vs 0.62 on
+  a 128-dim torus).
+- "Flows straight but not so fast": Reflow on curved spaces helped only at
+  low step counts, sometimes hurt at high step counts, was expensive, and
+  depended heavily on setup.
+
+======================================================================
+7. EARLIER GAPS FROM THE GRAPH WORK (Codes/SBM)
+======================================================================
+
+- Few-step consistency for DISCRETE data: largely CLOSED by 2024-2026
+  (Di4C, DUO, PairFlow, Categorical Flow Maps, CDLM). Categorical Flow Maps
+  does 1-step on QM9 molecular graphs. CDLM is text-only and lists graphs as
+  future work. CDLM also argues (Prop. D.5, "comonotonic pseudo-bridge")
+  that sharing one noise draw along the path - the tacm_v3 trick - causes
+  low diversity.
+- Coupling (pairing each noise sample with a similar-looking real graph):
+  the probe measured 23% less target ambiguity; the training experiment
+  gave 16% better 1-step quality, gradient noise unchanged.
+- Geodesic vs straight paths: failed on graphs, but graphs are not really
+  on the sphere. Open question: does geodesic help when the manifold is
+  real (sphere data: earthquakes, volcanoes, floods, fires; SO(3))?
+  Same instrument (geometry_ablation.py) on both.
+- Benchmark audit (short separate paper): the broken MMD kernel, the
+  degenerate Community_small dataset (212 distinct graphs out of 500), the
+  confounded geometry comparison, and a memorisation check.
+- Pre-training feasibility diagnostics: cheap model-free measurements that
+  predict whether a training run can succeed.
+
+======================================================================
+8. CORRECTIONS TO THINGS SAID EARLIER
+======================================================================
+
+- "Twist-only models have a hard floor near AMR-R 0.17 A on QM9": wrong as
+  a hard limit; we reached 0.164 on the first 100 test molecules.
+- "The paper had the same RDKit embedding failures": impossible; 86 failed
+  molecules caps COV-R at ~91.4%, and the paper reports 92.8%.
+- "Our notebook uses Torsional Diffusion's exact settings": not the network
+  type; their QM9 model uses use_second_order_repr: true, ours false.
+
+======================================================================
+9. PAPERS (PDFs in this folder; not in git - re-download from the links)
+======================================================================
+
+Core to the gap
+  01_TorsionalDiffusion_2022.pdf ............... https://arxiv.org/abs/2206.01729
+  02_AvgFlow_SO3-Averaged_FM_Reflow_2025.pdf ... https://arxiv.org/abs/2507.09785
+  03_SymDrift_OneShot_Symmetries_2026.pdf ...... https://arxiv.org/abs/2605.06140
+  04_RCM_Riemannian_Consistency_Model_2025.pdf . https://arxiv.org/abs/2510.00983
+  05_Flows_Straight_But_Not_So_Fast_2025.pdf ... https://arxiv.org/abs/2510.24732
+  06_Generalised_Flow_Maps_Riemannian_2025.pdf . https://arxiv.org/abs/2510.21608
+  07_SubFlow_SubMode_FM_OneStep_2026.pdf ....... https://arxiv.org/abs/2604.12273
+  08_TorsionNet_2020.pdf ....................... https://arxiv.org/abs/2006.07078
+  09_EC-Conf_Consistency_Conformers_2023.pdf ... https://arxiv.org/abs/2308.00237
+  10_GO-Flow_Geometric_FM_Conformers_2026.pdf .. https://arxiv.org/abs/2605.25577
+  11_SymmetryAware_FM_MolecularCrystals_2026.pdf https://arxiv.org/abs/2609.34690
+  12_SelfCorrected_Flow_Distillation_2024.pdf .. https://arxiv.org/abs/2412.16906
+  13_ET-Flow_Conformers_2024.pdf ............... https://arxiv.org/abs/2410.22388
+  FlowPacker (bioRxiv blocks automatic download; open in a browser)
+      https://www.biorxiv.org/content/10.1101/2024.07.05.602280
+  Letelier et al., symmetry analysis of internal rotation (paywalled)
+      https://www.sciencedirect.com/science/article/abs/pii/0022286080803334
+
+Foundations
+  20_Flow_Matching_2022.pdf .................... https://arxiv.org/abs/2210.02747
+  21_Riemannian_Flow_Matching_2023.pdf ......... https://arxiv.org/abs/2302.03660
+  22_Rectified_Flow_Reflow_2022.pdf ............ https://arxiv.org/abs/2209.03003
+  23_Consistency_Models_2023.pdf ............... https://arxiv.org/abs/2303.01469
+  24_GEOM_Dataset_2020.pdf ..................... https://arxiv.org/abs/2006.05531
+
+Graph-work papers (already in ../../Resources/): BWflow, DeFoG, CatFlow, GDSS,
+CDLM, Consistency Models, RCM. Discrete few-step: Di4C (arXiv 2410.08709),
+DUO (2506.10892), PairFlow (2512.20063), Categorical Flow Maps (2602.12233),
+CDLM (2605.00161).

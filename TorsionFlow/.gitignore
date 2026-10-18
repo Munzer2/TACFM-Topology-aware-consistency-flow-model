@@ -10,3 +10,5 @@ __pycache__/
 # torsional-diffusion/ is tracked (patched code, MIT licence); its own .gitignore drops the 200 MB *.npy tables
 runs/
 .venv/
+papers/*.pdf
+!papers/research_gaps.txt
