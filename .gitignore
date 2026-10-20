@@ -6,3 +6,7 @@ venv/
 *.pth
 *.npy
 __pycache__/
+
+# SPECTRE: raw downloads and training outputs (checkpoints are large)
+Codes/SBM/data/spectre/raw/
+Codes/SBM/results_spectre/**/*.pt
