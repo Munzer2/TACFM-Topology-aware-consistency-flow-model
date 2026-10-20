@@ -11,3 +11,4 @@ __pycache__/
 Codes/SBM/data/spectre/raw/
 Codes/SBM/results_spectre/**/*.pt
 .venv/
+!Codes/SBM/results_spectre/**/export_*.pt

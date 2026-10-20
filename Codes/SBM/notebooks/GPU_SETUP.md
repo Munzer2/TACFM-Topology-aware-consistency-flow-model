@@ -115,7 +115,7 @@ If `.venv` isn't in the list: Ctrl+Shift+P → **Python: Select Interpreter** �
 4. **Part D** times 10 training steps and prints:
    - **the estimated total training time**
    - **the peak GPU memory.** If it runs out of memory, lower `batch_size` in Part B (for example 32), then click **Restart** and **Run All** again.
-5. **Part F** trains. Progress lines appear under the cell. Every `eval_every` steps it scores the validation set at 1, 4 and 10 steps and saves a checkpoint.
+5. **Part F** trains. Progress lines appear under the cell. Every `eval_every` steps it scores the validation set at 1, 4 and 10 steps and writes the small weight exports (see step 9).
 6. **Parts G–I** plot the training curves, score the test set with DeFoG's protocol (5 runs × 40 graphs), and draw generated graphs.
 
 **During long runs:**
@@ -123,36 +123,52 @@ If `.venv` isn't in the list: Ctrl+Shift+P → **Python: Select Interpreter** �
 - Keep the machine from sleeping (Windows: Settings → System → Power → Sleep: Never).
 - Training output can get long. If VS Code shows *Output is truncated*, click it to open the full log in a text editor. Everything important is also saved to `history.json` (see step 9).
 
-## 8. Stopping and resuming
+## 8. Pausing and resuming
 
-- Training saves `last.pt` every `eval_every` steps.
-- To stop, click the **Interrupt** button (■) at the top of the notebook.
-- To continue, click **Run All** again. Part F prints `resumed from step ...` and carries on. This also works after closing VS Code or restarting the machine.
-- To start a fresh run instead, set `resume=False` or change `run_name` in Part B.
+- **To pause,** click the **Interrupt** button (■) at the top of the notebook. Part F catches it, saves `last.pt` at the current step, and prints `interrupted: saved last.pt at step ...`. No training is lost.
+- **To continue,** click **Run All** again. Part F prints `resumed from step ...` and carries on. This also works after closing VS Code or restarting the machine.
+- `last.pt` is also saved every `ckpt_every` steps (500, a few minutes of training), so a crash or power cut loses at most that much.
+- **To start a fresh run instead,** set `resume=False` or change `run_name` in Part B.
 
 ## 9. Where the results go
 
 Each run gets a folder `Codes/SBM/results_spectre/<run_name>/` containing:
 
-| File | What it is |
-|---|---|
-| `last.pt`, `best.pt` | checkpoints. Large, and ignored by git |
-| `history.json` | training loss and every validation score |
-| `test_results.json` | the final test table |
+| File | Size | Pushed to GitHub? | What it is |
+|---|---|---|---|
+| `last.pt`, `best.pt` | ~175 MB each | no (ignored) | full checkpoints for resuming: model, both EMAs, optimizer. Too big for GitHub's 100 MB limit |
+| `export_last.pt` | ~18 MB | yes | sampling weights (fp16) + config + validation scores at the latest evaluation |
+| `export_best.pt` | ~18 MB | yes | the same, for the best checkpoint so far |
+| `history.json` | small | yes | training loss and every validation score |
+| `test_results.json` | small | yes | the final test table (written by Part H) |
 
-To share results back, commit and push the two `.json` files (VS Code's Source Control panel works too):
+### Sharing progress during training
+
+You can push while training is still running; the export files are rewritten every `eval_every` steps (5,000).
 
 ```bash
-git add Codes/SBM/results_spectre/*/history.json Codes/SBM/results_spectre/*/test_results.json
+git add Codes/SBM/results_spectre/*/export_*.pt Codes/SBM/results_spectre/*/*.json
 ```
 
 ```bash
-git commit -m "Planar GPU run results"
+git commit -m "Planar run: weights at step N"
 ```
 
 ```bash
 git push
 ```
+
+Every push of new weights adds about 36 MB to the repository's history, so push every few hours rather than after every evaluation.
+
+### Scoring the pushed weights on a CPU
+
+After `git pull` on any machine, run from `Codes/SBM`:
+
+```bash
+python eval_spectre_export.py results_spectre/<run_name>/export_best.pt
+```
+
+It runs DeFoG's test protocol (5 runs × 40 graphs, at the run's step counts) and writes `cpu_eval_export_best_step<N>.json` next to the export. For a quicker look, add `--steps 4 --runs 1`.
 
 ## 10. If something goes wrong
 

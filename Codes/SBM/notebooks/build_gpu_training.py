@@ -158,7 +158,8 @@ CFG = dict(
     grad_clip=1.0,
     amp=True,                  # bfloat16 autocast for the transformer on GPU
     total_steps=100_000,
-    eval_every=5_000,          # validation scoring + checkpoint
+    eval_every=5_000,          # validation scoring, best.pt, small weight exports
+    ckpt_every=500,            # how often last.pt is saved (also saved when you interrupt)
     log_every=200,
     eval_steps=[1, 4, 10],     # sampling step counts to score
     select_steps=4,            # pick the best checkpoint by validation average ratio at this step count
@@ -339,14 +340,36 @@ def fmt(r):
 # ======================================================================
 cells.append(md(r"""## F. Training
 
-Rerunning this cell continues from `last.pt` in the run folder (set `CFG["resume"] = False` to start over). Every `eval_every` steps it scores the validation set at each step count in `eval_steps`, saves `last.pt`, and keeps `best.pt` (lowest validation average ratio at `select_steps`).
+Rerunning this cell continues from `last.pt` in the run folder (set `CFG["resume"] = False` to start over).
+
+- **Pausing:** click Interrupt (■). The cell catches it and saves `last.pt` before stopping, so no steps are lost. Rerun the cell (or Run All) to continue. `last.pt` is also saved every `ckpt_every` steps, in case the machine crashes.
+- **Every `eval_every` steps:** scores the validation set at each step count in `eval_steps`, keeps `best.pt` (lowest validation average ratio at `select_steps`), and writes two **small weight files for GitHub**:
+  - `export_last.pt`: the sampling weights in fp16 (about 18 MB), plus the config and validation scores
+  - `export_best.pt`: the same, for the best checkpoint so far
+
+  Unlike `last.pt` and `best.pt` (about 180 MB each, including the optimizer), these are small enough to push. `eval_spectre_export.py` scores them on a CPU.
 """))
 
-cells.append(code(r"""def save_ckpt(path, state):
-    torch.save({"student": student.state_dict(), "ema_tgt": ema_tgt.state_dict(), "ema_smp": ema_smp.state_dict(),
-                "opt": opt.state_dict(), "sched": sched.state_dict(), "cfg": CFG, "state": state,
-                "torch_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None}, path)
+cells.append(code(r"""def atomic_save(obj, path):
+    # Write to a temporary file, then swap it in, so an interrupt never leaves a half-written checkpoint.
+    tmp = Path(str(path) + ".tmp")
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
+
+def save_ckpt(path, state):
+    atomic_save({"student": student.state_dict(), "ema_tgt": ema_tgt.state_dict(), "ema_smp": ema_smp.state_dict(),
+                 "opt": opt.state_dict(), "sched": sched.state_dict(), "cfg": CFG, "state": state,
+                 "torch_rng": torch.get_rng_state(),
+                 "cuda_rng": torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None}, path)
+
+def export_weights(path, state, val=None):
+    # Sampling weights only, in fp16: small enough for GitHub (about 18 MB for the Planar transformer).
+    w = {k: (v.half() if v.is_floating_point() else v) for k, v in sampler_model().state_dict().items()}
+    atomic_save({"cfg": CFG, "n_max": N_MAX, "step": state["step"], "best_step": state["best_step"],
+                 "val": val, "weights": w}, path)
+
+def save_history(state):
+    json.dump({"cfg": CFG, "state": state}, open(RUN_DIR / "history.json", "w"), indent=1)
 
 state = {"step": 0, "history": [], "best_ratio": float("inf"), "best_step": None}
 if CFG["resume"] and (RUN_DIR / "last.pt").exists():
@@ -359,36 +382,47 @@ if CFG["resume"] and (RUN_DIR / "last.pt").exists():
     print(f"resumed from step {state['step']:,}")
 
 t0, run_loss, n_loss = time.time(), 0.0, 0
-while state["step"] < CFG["total_steps"]:
-    run_loss += train_step(); n_loss += 1
-    state["step"] += 1
-    step = state["step"]
+try:
+    while state["step"] < CFG["total_steps"]:
+        run_loss += train_step(); n_loss += 1
+        state["step"] += 1
+        step = state["step"]
 
-    if step % CFG["log_every"] == 0:
-        el = time.time() - t0
-        print(f"step {step:7,}  loss {run_loss / n_loss:.4f}  lr {sched.get_last_lr()[0]:.2e}  "
-              f"{n_loss / el:.1f} it/s", flush=True)
-        state["history"].append({"step": step, "loss": run_loss / n_loss})
-        t0, run_loss, n_loss = time.time(), 0.0, 0
+        if step % CFG["log_every"] == 0:
+            el = time.time() - t0
+            print(f"step {step:7,}  loss {run_loss / n_loss:.4f}  lr {sched.get_last_lr()[0]:.2e}  "
+                  f"{n_loss / el:.1f} it/s", flush=True)
+            state["history"].append({"step": step, "loss": run_loss / n_loss})
+            t0, run_loss, n_loss = time.time(), 0.0, 0
 
-    if step % CFG["eval_every"] == 0 or step == CFG["total_steps"]:
-        rng = (torch.get_rng_state(), torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None)
-        entry = {"step": step, "val": {}}
-        for s in CFG["eval_steps"]:
-            entry["val"][s] = score(sample_graphs(sampler_model(), CFG["num_samples"], s), "val")
-            print(f"  [val] step {step:7,}  {s:2d}-step  {fmt(entry['val'][s])}", flush=True)
-        torch.set_rng_state(rng[0])
-        if rng[1] is not None:
-            torch.cuda.set_rng_state_all(rng[1])
-        state["history"].append(entry)
-        sel = entry["val"][CFG["select_steps"]]["average_ratio"]
-        if sel < state["best_ratio"]:
-            state["best_ratio"], state["best_step"] = sel, step
-            save_ckpt(RUN_DIR / "best.pt", state)
-            print(f"  new best (ratio {sel:.2f} at {CFG['select_steps']} steps)")
-        save_ckpt(RUN_DIR / "last.pt", state)
-        json.dump({"cfg": CFG, "state": state}, open(RUN_DIR / "history.json", "w"), indent=1)
-        t0, run_loss, n_loss = time.time(), 0.0, 0
+        if step % CFG["eval_every"] == 0 or step == CFG["total_steps"]:
+            rng = (torch.get_rng_state(), torch.cuda.get_rng_state_all() if DEVICE.type == "cuda" else None)
+            entry = {"step": step, "val": {}}
+            for s in CFG["eval_steps"]:
+                entry["val"][s] = score(sample_graphs(sampler_model(), CFG["num_samples"], s), "val")
+                print(f"  [val] step {step:7,}  {s:2d}-step  {fmt(entry['val'][s])}", flush=True)
+            torch.set_rng_state(rng[0])
+            if rng[1] is not None:
+                torch.cuda.set_rng_state_all(rng[1])
+            state["history"].append(entry)
+            sel = entry["val"][CFG["select_steps"]]["average_ratio"]
+            if sel < state["best_ratio"]:
+                state["best_ratio"], state["best_step"] = sel, step
+                save_ckpt(RUN_DIR / "best.pt", state)
+                export_weights(RUN_DIR / "export_best.pt", state, entry["val"])
+                print(f"  new best (ratio {sel:.2f} at {CFG['select_steps']} steps)")
+            export_weights(RUN_DIR / "export_last.pt", state, entry["val"])
+            save_ckpt(RUN_DIR / "last.pt", state)
+            save_history(state)
+            t0, run_loss, n_loss = time.time(), 0.0, 0
+        elif step % CFG["ckpt_every"] == 0:
+            save_ckpt(RUN_DIR / "last.pt", state)
+            save_history(state)
+except KeyboardInterrupt:
+    save_ckpt(RUN_DIR / "last.pt", state)
+    save_history(state)
+    print(f"interrupted: saved last.pt at step {state['step']:,}. Rerun this cell to continue.")
+    raise
 
 print(f"done: {state['step']:,} steps, best validation ratio {state['best_ratio']:.2f} at step {state['best_step']}")
 """))
