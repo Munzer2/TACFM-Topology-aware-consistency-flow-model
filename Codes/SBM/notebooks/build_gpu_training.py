@@ -376,9 +376,10 @@ if CFG["resume"] and (RUN_DIR / "last.pt").exists():
     ck = torch.load(RUN_DIR / "last.pt", map_location=DEVICE, weights_only=False)
     student.load_state_dict(ck["student"]); ema_tgt.load_state_dict(ck["ema_tgt"]); ema_smp.load_state_dict(ck["ema_smp"])
     opt.load_state_dict(ck["opt"]); sched.load_state_dict(ck["sched"]); state = ck["state"]
-    torch.set_rng_state(ck["torch_rng"])
+    # map_location moved the saved RNG states to the GPU; the RNG setters need them on the CPU.
+    torch.set_rng_state(ck["torch_rng"].cpu())
     if ck["cuda_rng"] is not None and DEVICE.type == "cuda":
-        torch.cuda.set_rng_state_all(ck["cuda_rng"])
+        torch.cuda.set_rng_state_all([r.cpu() for r in ck["cuda_rng"]])
     print(f"resumed from step {state['step']:,}")
 
 t0, run_loss, n_loss = time.time(), 0.0, 0
