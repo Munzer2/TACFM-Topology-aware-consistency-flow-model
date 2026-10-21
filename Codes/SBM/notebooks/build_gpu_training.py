@@ -133,6 +133,8 @@ Defaults reproduce DeFoG's Planar setup for everything that is not part of our m
 
 - `target`: `"prev"` is the original TACFM-D (EMA target at the noisier time `t−δ`); `"next"` follows the original consistency-model recipe (target at `t+δ`, closer to the data).
 - `final`: how the last prediction becomes edges. `"topk"` keeps the `m` most likely edges, with `m` taken from a training graph (fixes empty 1-step graphs on sparse data); `"threshold"` is the old `p > 0.5`; `"sample"` draws each edge.
+- `renoise`: between sampling steps, `"hard"` re-noises **one concrete graph** (the prediction turned into edges with the `final` rule), which matches training; `"soft"` re-noises the predicted probabilities (the original sampler). On Planar, `"hard"` is much better.
+- `schedule`: `"poly3"` packs the sampling steps toward t = 1, where the last few wrong edges are fixed; `"uniform"` spaces them evenly.
 - `sample_with`: generate with a slow EMA of the weights (`"ema_sample"`) or the raw student.
 - `total_steps`: DeFoG trains Planar for ~200k optimizer steps (100k epochs × 2 batches). 100k is a good first run.
 """))
@@ -164,6 +166,8 @@ CFG = dict(
     eval_steps=[1, 4, 10],     # sampling step counts to score
     select_steps=4,            # pick the best checkpoint by validation average ratio at this step count
     final="topk",              # "topk", "threshold", "sample"
+    renoise="hard",            # between steps, re-noise one concrete graph ("hard") or the probabilities ("soft")
+    schedule="poly3",          # step times: "uniform" or "polyP" (packed toward t = 1)
     num_samples=40,            # graphs per evaluation (DeFoG: 40)
     final_runs=5,              # test runs for the final table (DeFoG: 5)
     orbit=True,                # orbit MMD needs the ORCA binary
@@ -321,7 +325,8 @@ def sampler_model():
 def sample_graphs(model, num, steps, final=None, times=None):
     idx = torch.randint(len(n_train), (num,), device=DEVICE)
     n, m = n_train[idx], m_train[idx]
-    x = generate(model, p_slot, n, layout, steps, final=final or CFG["final"], n_edges=m, times=times)
+    x = generate(model, p_slot, n, layout, steps, final=final or CFG["final"], n_edges=m, times=times,
+                 renoise=CFG.get("renoise", "soft"), schedule=CFG.get("schedule", "uniform"))
     return slots_to_graphs(x, n, layout)
 
 def score(gen, split):

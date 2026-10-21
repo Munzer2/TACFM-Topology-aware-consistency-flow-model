@@ -37,6 +37,8 @@ def main():
     p.add_argument("--runs", type=int, default=5)
     p.add_argument("--num_samples", type=int, default=40)
     p.add_argument("--final", default=None, help="topk / threshold / sample (default: the run's setting)")
+    p.add_argument("--renoise", default=None, help="hard / soft (default: the run's setting, else soft)")
+    p.add_argument("--schedule", default=None, help="uniform / polyP (default: the run's setting, else uniform)")
     p.add_argument("--no_orbit", action="store_true", help="skip the orbit MMD (needs the ORCA binary)")
     p.add_argument("--device", default="cpu")
     args = p.parse_args()
@@ -46,9 +48,11 @@ def main():
     cfg = ex["cfg"]
     steps_list = args.steps or cfg["eval_steps"]
     final = args.final or cfg["final"]
+    renoise = args.renoise or cfg.get("renoise", "soft")
+    schedule = args.schedule or cfg.get("schedule", "uniform")
     keys = tuple(k for k in MMD_KEYS if not (k == "orbit" and (args.no_orbit or not cfg.get("orbit", True))))
     print(f"{cfg['run_name']} | trained {ex['step']:,} steps (best so far at {ex['best_step']}) | "
-          f"final='{final}' | {args.runs} runs x {args.num_samples} samples | device {device}")
+          f"final='{final}' renoise='{renoise}' schedule='{schedule}' | {args.runs} runs x {args.num_samples} samples | device {device}")
 
     load = lambda part: pickle.load(open(HERE / "data" / "spectre" / f"{cfg['dataset']}_{part}.pkl", "rb"))
     train_g, test_g = load("train"), load("test")
@@ -81,7 +85,7 @@ def main():
             torch.manual_seed(1000 + r)
             idx = torch.randint(len(n_train), (args.num_samples,), device=device)
             n, m = n_train[idx], m_train[idx]
-            x = generate(model, p_slot, n, layout, steps, final=final, n_edges=m)
+            x = generate(model, p_slot, n, layout, steps, final=final, n_edges=m, renoise=renoise, schedule=schedule)
             gen = slots_to_graphs(x, n, layout)
             out = mmd_metrics(test_g, gen, keys)
             out.update(ratios(out, ref))
@@ -94,8 +98,9 @@ def main():
             if k in ("degree", "clustering", "orbit", "spectre", "wavelet", "average_ratio", "valid", "vun")),
             flush=True)
 
-    out_path = Path(args.export).with_name(f"cpu_eval_{Path(args.export).stem}_step{ex['step']}.json")
-    json.dump({"export": str(args.export), "step": ex["step"], "final": final, "runs": args.runs,
+    out_path = Path(args.export).with_name(f"cpu_eval_{Path(args.export).stem}_step{ex['step']}_{renoise}_{schedule}.json")
+    json.dump({"export": str(args.export), "step": ex["step"], "final": final, "renoise": renoise,
+               "schedule": schedule, "runs": args.runs,
                "num_samples": args.num_samples, "reference": ref,
                "test": {str(s): v for s, v in table.items()}}, open(out_path, "w"), indent=1)
     print("wrote", out_path)
