@@ -203,10 +203,23 @@ def masked_bce(logits, target, mask):
     return (F.binary_cross_entropy_with_logits(logits, target, reduction="none") * mask).sum() / mask.sum()
 
 
-def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev"):
+def rowwise_bce(logits, target, mask):
+    return (F.binary_cross_entropy_with_logits(logits, target, reduction="none") * mask).sum(1) / mask.sum(1).clamp(min=1.0)
+
+
+def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev",
+               self_correct=0.0, sc_start=(0.3, 0.95), sc_jump=(0.4, 0.9)):
     """target='prev': EMA target at the noisier time t - delta (the original TACFM-D).
     target='next': EMA target at t + delta, closer to the data, as in Song et al.'s consistency
-    models; where t + delta reaches 1 the target is the real graph (boundary condition)."""
+    models; where t + delta reaches 1 the target is the real graph (boundary condition).
+
+    self_correct (sampler-aware training): the fraction of the batch trained on the input the
+    sampler actually produces. For those rows:
+        s ~ U[sc_start];  x_s = real graph noised to s;  guess = top-k of EMA(x_s, s)   (no grad)
+        t = s + (1 - s) * U[sc_jump];  x_t = the GUESS noised to t
+        loss = lam * BCE(student(x_t, t), real graph)          (no consistency term)
+    so the model practises removing its own mistakes instead of only random noise. With
+    self_correct=0 the computation is exactly the original one."""
     B = x1.shape[0]
     u = torch.rand(B, layout.d, device=x1.device)
     t = torch.rand(B, 1, device=x1.device)
@@ -216,8 +229,32 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
         col = couple(u, x1, mask, p_slot, layout)
         x1, mask, n_nodes = x1[col], mask[col], n_nodes[col]
     p0 = p_slot.unsqueeze(0) * mask
+
+    if self_correct <= 0:
+        t_tgt = (t - delta).clamp(min=0.0) if target == "prev" else (t + delta).clamp(max=1.0)
+        x_t = sample_path(u, p0, x1, t)
+        x_tgt = sample_path(u, p0, x1, t_tgt)
+
+        logits = student(x_t, t, n_nodes)
+        with torch.no_grad():
+            soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
+            if target == "next":
+                soft = torch.where(t_tgt >= 1.0, x1, soft)
+        return masked_bce(logits, soft, mask) + lam * masked_bce(logits, x1, mask)
+
+    # ---- sampler-aware rows ----
+    dev = x1.device
+    sc = torch.rand(B, device=dev) < self_correct
+    s = sc_start[0] + (sc_start[1] - sc_start[0]) * torch.rand(B, 1, device=dev)
+    t_sc = s + (1 - s) * (sc_jump[0] + (sc_jump[1] - sc_jump[0]) * torch.rand(B, 1, device=dev))
+    t = torch.where(sc.unsqueeze(1), t_sc, t)
+    with torch.no_grad():
+        x_s = sample_path(torch.rand_like(x1), p0, x1, s)
+        guess = top_k_slots(torch.sigmoid(ema(x_s, s, n_nodes)) * mask, x1.sum(1).long(), mask)
+    source = torch.where(sc.unsqueeze(1), guess, x1)       # what gets noised to time t
+
     t_tgt = (t - delta).clamp(min=0.0) if target == "prev" else (t + delta).clamp(max=1.0)
-    x_t = sample_path(u, p0, x1, t)
+    x_t = sample_path(u, p0, source, t)
     x_tgt = sample_path(u, p0, x1, t_tgt)
 
     logits = student(x_t, t, n_nodes)
@@ -225,7 +262,9 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
         soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
         if target == "next":
             soft = torch.where(t_tgt >= 1.0, x1, soft)
-    return masked_bce(logits, soft, mask) + lam * masked_bce(logits, x1, mask)
+    consistency = rowwise_bce(logits, soft, mask) * (~sc).float()   # only for the ordinary rows
+    denoise = rowwise_bce(logits, x1, mask)
+    return (consistency + lam * denoise).mean()
 
 
 def top_k_slots(scores, k, mask):
