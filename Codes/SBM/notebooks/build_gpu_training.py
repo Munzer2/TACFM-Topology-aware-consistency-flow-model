@@ -132,6 +132,7 @@ cells.append(md(r"""## B. Config
 Defaults reproduce DeFoG's Planar setup for everything that is not part of our method (network size, RRWP features, batch 64, AdamW lr 2e-4).
 
 - `target`: `"prev"` is the original TACFM-D (EMA target at the noisier time `t−δ`); `"next"` follows the original consistency-model recipe (target at `t+δ`, closer to the data).
+- `alpha`: the share of the loss given to "match the real graph" (the anchor). `None` uses `lam` the old way (`lam=3` = a 75% share). The literature (CDLM) uses 10–40%; test with `sampler_aware_ab.ipynb` first.
 - `final`: how the last prediction becomes edges. `"topk"` keeps the `m` most likely edges, with `m` taken from a training graph (fixes empty 1-step graphs on sparse data); `"threshold"` is the old `p > 0.5`; `"sample"` draws each edge.
 - `renoise`: between sampling steps, `"hard"` re-noises **one concrete graph** (the prediction turned into edges with the `final` rule), which matches training; `"soft"` re-noises the predicted probabilities (the original sampler). On Planar, `"hard"` is much better.
 - `schedule`: `"poly3"` packs the sampling steps toward t = 1, where the last few wrong edges are fixed; `"uniform"` spaces them evenly.
@@ -148,7 +149,9 @@ CFG = dict(
     prior="slot",              # "slot" (one edge probability per slot) or "global"
     coupling=True,             # topology-aware (degree-sequence) coupling
     target="prev",             # "prev" or "next" (see above)
-    lam=3.0,                   # weight of the BCE-to-real-graph term
+    lam=3.0,                   # weight of the BCE-to-real-graph term (used only when alpha is None)
+    alpha=None,                # anchor share of the loss, 0..1: 4*((1-alpha)*consistency + alpha*anchor);
+                               # 0.75 equals lam=3 exactly. None keeps consistency + lam * anchor
     ema_target=0.995,          # EMA used as the consistency target
     ema_sample=0.9995,         # slower EMA used for sampling
     sample_with="ema_sample",  # "ema_sample" or "student"
@@ -265,7 +268,7 @@ def ema_update(ema, model, decay):
 def train_step():
     idx = torch.randint(len(x1_train), (CFG["batch_size"],), device=DEVICE)
     loss = batch_loss(student, ema_tgt, x1_train[idx], n_train[idx], p_slot, layout,
-                      coupling=CFG["coupling"], lam=CFG["lam"], target=CFG["target"])
+                      coupling=CFG["coupling"], lam=CFG["lam"], target=CFG["target"], alpha=CFG["alpha"])
     opt.zero_grad(set_to_none=True)
     loss.backward()
     if CFG["grad_clip"]:

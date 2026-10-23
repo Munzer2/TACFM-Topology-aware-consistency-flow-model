@@ -9,16 +9,19 @@ from nbformat.v4 import new_notebook, new_markdown_cell as md, new_code_cell as 
 
 cells = []
 
-cells.append(md(r"""# Short A/B test: does sampler-aware training help 4-step generation?
+cells.append(md(r"""# Short A/B tests: what helps 4-step generation?
 
-**Question.** The trained Planar model keeps most of its *own* mistakes when the sampler re-noises its earlier guess (66–87% kept, versus 9–63% for random noise), so the later sampling steps barely improve on the first guess. Sampler-aware training trains it on exactly that kind of input. Does that fix it?
+**Question.** The trained Planar model keeps most of its *own* mistakes when the sampler re-noises its earlier guess (66–87% kept, versus 9–63% for random noise), so the later sampling steps barely improve on the first guess. Which change helps most: training on that kind of input (sampler-aware v1/v2), pointing the consistency target the right way (`target_next`), or giving the consistency term more weight (`alpha_0.3`)?
 
-**Design.** Two short fine-tunes from the **same starting weights** (the finished `prev` run), identical in everything except the training input:
+**Design.** Short fine-tunes from the **same starting weights** (the finished `prev` run). Each arm changes **one thing** relative to `control`:
 
-| Arm | Training |
+| Arm | What changes |
 |---|---|
-| `control` | the normal TACFM-D loss |
-| `sampler_aware` | half of each batch is built like the sampler does: real graph → noised to time s → **the model's own guess** → noised to time t → recover the real graph |
+| `control` | nothing: the normal TACFM-D loss (target `prev`, anchor share α = 0.75, i.e. the old λ = 3) |
+| `sampler_aware` (v1) | half of each batch is built like the sampler does: real graph → noised to s ∈ [0.3, 0.95] → **the model's own guess** → noised to a later t → recover the real graph |
+| `sampler_aware_v2` | the same, but (s, t) are the sampler's **actual step times** (4- and 10-step poly3), **including s = 0**. A guess from pure noise is supervised toward the most similar real graph in the batch (Hungarian on sorted degree sequences) |
+| `target_next` | the consistency target is computed at the **cleaner** time t + δ, as in every published consistency model |
+| `alpha_0.3` | the anchor ("match the real graph") gets **30%** of the loss instead of 75%, CDLM's range |
 
 The control matters: fine-tuning alone (a fresh learning-rate schedule) could improve things, so only the **difference between the two arms** counts.
 
@@ -26,7 +29,7 @@ The control matters: fine-tuning alone (a fresh learning-rate schedule) could im
 1. **Self-correction check:** how many of its *own* wrong edges the model keeps (lower is better), and whether a step improves on the previous guess.
 2. **Test set, DeFoG protocol:** 4- and 10-step scores, 5 runs × 40 graphs.
 
-**Time on the RTX 5080:** about 35 min (control) + 45 min (sampler-aware) + 10–15 min of scoring. Each arm saves its progress, so rerunning the notebook continues where it stopped.
+**Time on the RTX 5080:** about 35–45 min of training per arm plus about 5 min of scoring per arm, so **about 4 hours for all five**. Each arm saves its progress and finished arms are skipped, so you can stop at any time and rerun to continue. To run fewer arms, delete entries from `ARMS` in Part B.
 """))
 
 cells.append(md(r"""## A. Setup"""))
@@ -43,7 +46,7 @@ HERE = Path.cwd()
 SBM_DIR = next(p for p in [HERE, HERE.parent, HERE / "Codes" / "SBM"] if (p / "tacfm_d.py").exists())
 sys.path.insert(0, str(SBM_DIR))
 
-from tacfm_d import (SlotLayout, graphs_to_slots, slots_to_graphs, edge_prior, batch_loss, generate,
+from tacfm_d import (SlotLayout, graphs_to_slots, slots_to_graphs, edge_prior, batch_loss, generate, sampler_pairs,
                      sample_path, top_k_slots, GCNDiscrete)
 from defog_nn import SlotGraphTransformer
 from spectre_eval import mmd_metrics, ratios, vun_metrics, MMD_KEYS
@@ -79,16 +82,24 @@ cells.append(code(r"""CFG = dict(
     amp=True,
     ema_target=0.995,          # consistency-target EMA (as in the base run)
     ema_sample=0.999,          # sampling EMA (shorter than the base run's 0.9995, to fit 5k steps)
-    self_correct=0.5,          # sampler_aware arm: fraction of each batch built from the model's own guesses
-    sc_start=(0.3, 0.95),      # time s of the guess
-    sc_jump=(0.4, 0.9),        # t = s + (1 - s) * U[sc_jump]
+    self_correct=0.5,          # sampler-aware arms: fraction of each batch built from the model's own guesses
+    sc_start=(0.3, 0.95),      # v1: time s of the guess
+    sc_jump=(0.4, 0.9),        # v1: t = s + (1 - s) * U[sc_jump]
+    sc_pair_steps=(4, 10),     # v2: (s, t) pairs = consecutive step times of these samplers
     eval_steps=[4, 10],
     num_samples=40,
     final_runs=5,
     seed=0,
     out_dir="results_spectre/ab_sampler_aware",
 )
-ARMS = {"control": 0.0, "sampler_aware": CFG["self_correct"]}
+# Each arm = overrides of the base run's training settings. Delete entries to run fewer arms.
+ARMS = {
+    "control":          {},
+    "sampler_aware":    {"self_correct": CFG["self_correct"]},
+    "sampler_aware_v2": {"self_correct": CFG["self_correct"], "sc_pairs": "sampler"},
+    "target_next":      {"target": "next"},
+    "alpha_0.3":        {"alpha": 0.3},
+}
 
 init = torch.load(SBM_DIR / CFG["init_from"], map_location="cpu", weights_only=False)
 BASE = init["cfg"]
@@ -220,7 +231,7 @@ show_test({int(k): v for k, v in RESULTS["start"]["test"].items()}, "START: test
 
 cells.append(md(r"""## F. Fine-tune both arms
 
-Same seed, same steps, same learning-rate schedule; the only difference is `self_correct`. Progress is saved every 500 steps and on interrupt (■); rerunning continues.
+Same seed, same steps, same learning-rate schedule; each arm differs from `control` only in its overrides. Progress is saved every 500 steps and on interrupt (■); rerunning continues.
 """))
 
 cells.append(code(r"""def atomic_save(obj, path):
@@ -237,7 +248,7 @@ def lr_at(step):
     prog = (step - CFG["warmup_steps"]) / max(1, CFG["steps"] - CFG["warmup_steps"])
     return 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
 
-def finetune(arm, self_correct):
+def finetune(arm, ov):
     arm_dir = OUT / arm; arm_dir.mkdir(exist_ok=True)
     done_path, last_path = arm_dir / "done.pt", arm_dir / "last.pt"
     student = build_model(); ema_tgt = frozen_copy(student); ema_smp = frozen_copy(student)
@@ -268,8 +279,12 @@ def finetune(arm, self_correct):
         while step < CFG["steps"]:
             idx = torch.randint(len(x1_train), (CFG["batch_size"],), device=DEVICE)
             loss = batch_loss(student, ema_tgt, x1_train[idx], n_train[idx], p_slot, layout,
-                              coupling=BASE["coupling"], lam=BASE["lam"], target=BASE["target"],
-                              self_correct=self_correct, sc_start=CFG["sc_start"], sc_jump=CFG["sc_jump"])
+                              coupling=BASE["coupling"], lam=BASE["lam"],
+                              target=ov.get("target", BASE["target"]),
+                              alpha=ov.get("alpha", BASE.get("alpha")),
+                              self_correct=ov.get("self_correct", 0.0),
+                              sc_start=CFG["sc_start"], sc_jump=CFG["sc_jump"],
+                              sc_pairs=SC_PAIRS if ov.get("sc_pairs") == "sampler" else None)
             opt.zero_grad(set_to_none=True); loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), CFG["grad_clip"])
             opt.step(); sched.step()
@@ -284,13 +299,16 @@ def finetune(arm, self_correct):
     except KeyboardInterrupt:
         save(last_path); print(f"[{arm}] interrupted: saved step {step:,}. Rerun to continue."); raise
     save(done_path)
-    atomic_save({"cfg": {**BASE, **{"finetune": CFG, "arm": arm}}, "n_max": N_MAX, "step": init["step"] + step,
+    atomic_save({"cfg": {**BASE, **{k: v for k, v in ov.items() if k in ("target", "alpha")},
+                         **{"finetune": CFG, "arm": arm, "overrides": ov}}, "n_max": N_MAX, "step": init["step"] + step,
                  "best_step": None, "val": None,
                  "weights": {k: (v.half() if v.is_floating_point() else v) for k, v in ema_smp.state_dict().items()}},
                 arm_dir / f"export_{arm}.pt")
     return ema_smp
 
-MODELS = {arm: finetune(arm, sc) for arm, sc in ARMS.items()}
+SC_PAIRS = sampler_pairs(CFG["sc_pair_steps"], BASE.get("schedule", "poly3"))
+print("v2 step pairs:", [tuple(round(v, 3) for v in pr.tolist()) for pr in SC_PAIRS])
+MODELS = {arm: finetune(arm, ov) for arm, ov in ARMS.items()}
 """))
 
 cells.append(md(r"""## G. Compare"""))
@@ -309,21 +327,22 @@ def g(name, steps, key):
     return r[key]
 print("\nSUMMARY (lower ratio is better; higher V.U.N. is better; lower 'own kept' is better)")
 head = "".join(f"{f'{st}-step ratio':>18}{f'{st}-step VUN':>13}" for st in CFG["eval_steps"])
-print(f"{'':>15}{head}{'own kept .58->.88':>19}{'own kept .88->.98':>19}")
+print(f"{'':>18}{head}{'own kept .58->.88':>19}{'own kept .88->.98':>19}")
 for name in ["start", *ARMS]:
     sc = RESULTS[name]["self_correction"]
     cols = "".join(f"{g(name, st, 'average_ratio')[0]:11.1f}+/-{g(name, st, 'average_ratio')[1]:<4.1f}"
                    f"{g(name, st, 'vun')[0]:13.1%}" for st in CFG["eval_steps"])
-    print(f"{name:>15}{cols}{sc['0.58->0.88']['own_kept']:19.1%}{sc['0.88->0.98']['own_kept']:19.1%}")
+    print(f"{name:>18}{cols}{sc['0.58->0.88']['own_kept']:19.1%}{sc['0.88->0.98']['own_kept']:19.1%}")
 """))
 
 cells.append(md(r"""## H. How to read it, and what to push
 
-**Sampler-aware training works if, compared with `control` (not with `start`):**
-1. **`own kept` drops clearly** (e.g. from ~70% toward the ~10% the model keeps of random noise), and `gain` becomes positive (a step now improves on the guess), **and**
-2. the **4-step ratio is lower** and/or **4-step V.U.N. is higher**, by more than the `+/-` spread.
+Always compare an arm with **`control`**, not with `start`: `control` had the same extra training, so only the difference is due to the change.
 
-If (1) holds but (2) doesn't, the model learned to fix its mistakes but 5k steps weren't enough to show in the samples: a longer run is the next step. If neither holds, the idea doesn't help here.
+- **An arm helps** if its **4-step ratio is lower** and/or **4-step V.U.N. is higher** than `control`'s by more than the `+/-` spread. Check that 10-step quality didn't get worse.
+- **For the sampler-aware arms, also look at the self-correction check:** `own kept` should drop clearly (from ~70% toward the ~10% the model keeps of random noise) and `gain` should become positive (a step now improves on the guess). If that happens but the 4-step scores don't move yet, the model learned to fix its mistakes but 5k steps weren't enough to show it in the samples.
+- **For `alpha_0.3`, watch for collapse:** `unique` falling below ~1.0 in the test table means the generated graphs start to look alike.
+- **Next step:** combine the arms that help (for example `target_next` + the better sampler-aware version) in one more short run, then train the winner from scratch.
 
 **Push the results** (small files) from the repository root:
 
