@@ -9,24 +9,26 @@ from nbformat.v4 import new_notebook, new_markdown_cell as md, new_code_cell as 
 
 cells = []
 
-cells.append(md(r"""# Short A/B test: does self-conditioning help few-step generation?
+cells.append(md(r"""# Short A/B test: how much weight should the anchor get?
 
-**Question.** `target="next"` was the one change that helped in the first A/B round (10-step V.U.N. 20% vs 8.5% for control). Does **self-conditioning** help on top of it? With self-conditioning, the model also gets **its previous prediction** (soft edge probabilities) as an extra input, so each sampling step can build on the last one instead of starting from only the scrambled graph.
+**Question.** The loss has two parts: the **consistency** term (match the EMA model's prediction from a cleaner point on the same path) and the **anchor** (match the real graph). Every run so far gave the anchor **75%** of the loss (α = 0.75, the old λ = 3). The literature uses 10–40% (CDLM) up to about 75% (Categorical Flow Maps). And **α = 1.0 switches the consistency term off**, which shows whether it helps at all.
 
-**Design.** Two 5k-step fine-tunes from the **same starting weights** (the finished `prev` run), identical except for self-conditioning:
+**Design.** Four 5k-step fine-tunes from the **same starting weights** (the finished `prev` run), all with `target="next"` (the change that helped so far), differing only in α:
 
-| Arm | Training |
-|---|---|
-| `target_next` | consistency target at the cleaner time (the Session 1 winner). This is the baseline here |
-| `next_self_cond` | the same, **plus self-conditioning**: one extra edge input channel holding the previous prediction. In half the rows, the model first predicts without a hint (no gradient), then predicts again with that prediction as the hint; the other rows get an empty hint, as the first sampling step does. The new channel starts at zero, so the model starts exactly where `target_next` starts |
+| Arm | α (anchor share) | What it tells us |
+|---|---|---|
+| `next_alpha_0.75` | 0.75 | today's setting: the baseline (Session 1 / self-conditioning test: 20–25% V.U.N. at 10 steps) |
+| `next_alpha_0.5` | 0.5 | does more consistency help? |
+| `next_alpha_0.3` | 0.3 | CDLM's range |
+| `next_alpha_1.0` | 1.0 | **consistency off**: a plain denoiser. If this matches the others, the consistency term isn't doing anything |
 
-Compare `next_self_cond` with **`target_next`**, not with `start`.
+With α, the loss is `4 × ((1 − α) × consistency + α × anchor)`, so every arm has the same total weight and α = 0.75 is exactly the old loss. Compare every arm with **`next_alpha_0.75`**.
 
-**Measured for the starting weights and both arms:**
+**Measured for the starting weights and every arm:**
 1. **Test set, DeFoG protocol:** scores at **4, 10 and 20 sampling steps**, 5 runs × 40 graphs each.
-2. **Self-correction check:** how many of its own wrong edges the model keeps when its earlier guess is re-noised (with self-conditioning, the earlier guess is also passed as the hint).
+2. **Self-correction check:** how many of its own wrong edges the model keeps when its earlier guess is re-noised.
 
-**Time on the RTX 5080:** about 40 min (`target_next`) + about 60 min (`next_self_cond`, which does two extra forward passes per step) + about 15 min of scoring. Each arm saves its progress and finished arms are skipped, so you can stop at any time and rerun to continue.
+**Time on the RTX 5080:** about 40 min of training plus about 5 min of scoring per arm, so **about 3 hours**. Each arm saves its progress and finished arms are skipped, so you can stop at any time and rerun to continue. To run fewer arms, delete entries from `ARMS` in Part B.
 """))
 
 cells.append(md(r"""## A. Setup"""))
@@ -65,7 +67,7 @@ print("ORCA:", "found" if ORCA_BIN.exists() else "MISSING (orbit MMD will fail)"
 
 cells.append(md(r"""## B. Config
 
-`init_from` is the starting point for both arms (the same weights Session 1 started from): the exported weights of the finished `prev` run (pushed to GitHub). Everything about the model and sampler (network size, ordering, prior, coupling, target, `topk` / `hard` / `poly3` sampling) is read from that run's config, so both arms continue exactly that setup.
+`init_from` is the starting point for every arm (the final `prev` export): the exported weights of the finished `prev` run (pushed to GitHub). Everything about the model and sampler (network size, ordering, prior, coupling, target, `topk` / `hard` / `poly3` sampling) is read from that run's config, so both arms continue exactly that setup.
 """))
 
 cells.append(code(r"""CFG = dict(
@@ -80,16 +82,19 @@ cells.append(code(r"""CFG = dict(
     ema_target=0.995,          # consistency-target EMA (as in the base run)
     ema_sample=0.999,          # sampling EMA (shorter than the base run's 0.9995, to fit 5k steps)
     sc_prob=0.5,               # self-conditioning: share of rows that get their own first prediction as the hint
+    delta_range=(0.1, 0.3),    # gap between the student's time and the EMA target's time (the original range)
     eval_steps=[4, 10, 20],    # sampling step counts scored on the test set
     num_samples=40,
     final_runs=5,
     seed=0,
-    out_dir="results_spectre/ab_self_cond",
+    out_dir="results_spectre/ab_alpha",
 )
 # Each arm = overrides of the base run's training settings. Delete entries to run fewer arms.
 ARMS = {
-    "target_next":    {"target": "next"},
-    "next_self_cond": {"target": "next", "self_cond": True},
+    "next_alpha_0.75": {"target": "next", "alpha": 0.75},
+    "next_alpha_0.5":  {"target": "next", "alpha": 0.5},
+    "next_alpha_0.3":  {"target": "next", "alpha": 0.3},
+    "next_alpha_1.0":  {"target": "next", "alpha": 1.0},
 }
 
 init = torch.load(SBM_DIR / CFG["init_from"], map_location="cpu", weights_only=False)
@@ -231,7 +236,7 @@ show_test({int(k): v for k, v in RESULTS["start"]["test"].items()}, "START: test
 
 cells.append(md(r"""## F. Fine-tune both arms
 
-Same seed, same steps, same learning-rate schedule; the arms differ only in self-conditioning. Progress is saved every 500 steps and on interrupt (■); rerunning continues.
+Same seed, same steps, same learning-rate schedule; the arms differ only in α. Progress is saved every 500 steps and on interrupt (■); rerunning continues.
 """))
 
 cells.append(code(r"""def atomic_save(obj, path):
@@ -282,7 +287,8 @@ def finetune(arm, ov):
                               coupling=BASE["coupling"], lam=BASE["lam"],
                               target=ov.get("target", BASE["target"]),
                               alpha=ov.get("alpha", BASE.get("alpha")),
-                              self_cond=ov.get("self_cond", False), sc_prob=CFG["sc_prob"])
+                              self_cond=ov.get("self_cond", False), sc_prob=CFG["sc_prob"],
+                              delta_range=tuple(ov.get("delta_range", CFG["delta_range"])))
             opt.zero_grad(set_to_none=True); loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), CFG["grad_clip"])
             opt.step(); sched.step()
@@ -334,25 +340,27 @@ for name in ["start", *ARMS]:
 
 cells.append(md(r"""## H. How to read it, and what to push
 
-Compare **`next_self_cond`** with **`target_next`** (same fine-tune, same starting weights; only self-conditioning differs).
+Compare every arm with **`next_alpha_0.75`** (today's setting; same fine-tune and starting weights, only α differs). With 200 test graphs per step count, a V.U.N. gap of about 8 points or more is unlikely to be chance.
 
-- **Self-conditioning helps** if `next_self_cond` has **higher V.U.N. at 10 and 20 steps** than `target_next`, by more than the `+/-` spread, without worse MMDs. With 200 test graphs per step count, a gap of about 8 points or more is unlikely to be chance.
-- **4 steps:** both will probably stay near 0% valid; look at the 4-step ratio and MMDs for any movement.
-- **Collapse check:** `unique` well below 1.0 means the graphs started to look alike.
-- **If it helps:** train `target="next"` + self-conditioning from scratch with the main notebook (`self_cond=True` in its Part B) and compare with the plain `target_next` from-scratch run. **If not:** drop it.
+- **A lower α helps** if `next_alpha_0.5` or `next_alpha_0.3` has **higher V.U.N. at 10 and 20 steps** than `next_alpha_0.75` without worse MMDs. Then the next from-scratch run should use that α.
+- **`next_alpha_1.0` (consistency off) is the key result for the paper:**
+  - clearly **worse** than `next_alpha_0.75`: the consistency term helps;
+  - about the **same**: the gain from `target="next"` doesn't come from consistency training, and the method is effectively a denoiser with a good sampler. That changes how the paper should be framed.
+- **Collapse check for low α:** `unique` well below 1.0 means the generated graphs started to look alike.
+- **4 steps:** all arms will probably stay near 0% valid; look at the 4-step ratio and MMDs for movement.
 
 **Push the results** (small files) from the repository root:
 
 ```bash
-git add Codes/SBM/results_spectre/ab_self_cond/ab_results.json Codes/SBM/results_spectre/ab_self_cond/*/export_*.pt
+git add Codes/SBM/results_spectre/ab_alpha/ab_results.json Codes/SBM/results_spectre/ab_alpha/*/export_*.pt
 ```
 
 ```bash
-git commit -m "Self-conditioning A/B results"
+git commit -m "Anchor share (alpha) A/B results"
 ```
 
 ```bash
-git push
+git push origin main
 ```
 """))
 

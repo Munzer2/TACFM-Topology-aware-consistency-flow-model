@@ -132,6 +132,7 @@ cells.append(md(r"""## B. Config
 Defaults reproduce DeFoG's Planar setup for everything that is not part of our method (network size, RRWP features, batch 64, AdamW lr 2e-4).
 
 - `target`: `"prev"` is the original TACFM-D (EMA target at the noisier time `t−δ`); `"next"` follows the original consistency-model recipe (target at `t+δ`, closer to the data).
+- `delta_range`: how far apart (in time) the student's input and the EMA target's input are, drawn uniformly from this range. (0.1, 0.3) is the original; the 4-step sampler's jumps are larger (up to 0.58).
 - `self_cond`: self-conditioning, i.e. the model also gets its previous prediction as an extra input (empty at the first sampling step). Test it with `sampler_aware_ab.ipynb` before training from scratch. The run folder gets `_sc` in its name.
 - `alpha`: the share of the loss given to "match the real graph" (the anchor). `None` uses `lam` the old way (`lam=3` = a 75% share). The literature (CDLM) uses 10–40%; test with `sampler_aware_ab.ipynb` first.
 - `final`: how the last prediction becomes edges. `"topk"` keeps the `m` most likely edges, with `m` taken from a training graph (fixes empty 1-step graphs on sparse data); `"threshold"` is the old `p > 0.5`; `"sample"` draws each edge.
@@ -154,6 +155,7 @@ CFG = dict(
     alpha=None,                # anchor share of the loss, 0..1: 4*((1-alpha)*consistency + alpha*anchor);
                                # 0.75 equals lam=3 exactly. None keeps consistency + lam * anchor
     self_cond=False,           # self-conditioning: feed the previous prediction back as an extra edge input
+    delta_range=(0.1, 0.3),    # gap between the student's time and the EMA target's time, delta ~ U[range]
     ema_target=0.995,          # EMA used as the consistency target
     ema_sample=0.9995,         # slower EMA used for sampling
     sample_with="ema_sample",  # "ema_sample" or "student"
@@ -274,7 +276,7 @@ def train_step():
     idx = torch.randint(len(x1_train), (CFG["batch_size"],), device=DEVICE)
     loss = batch_loss(student, ema_tgt, x1_train[idx], n_train[idx], p_slot, layout,
                       coupling=CFG["coupling"], lam=CFG["lam"], target=CFG["target"], alpha=CFG["alpha"],
-                      self_cond=CFG["self_cond"])
+                      self_cond=CFG["self_cond"], delta_range=tuple(CFG.get("delta_range", (0.1, 0.3))))
     opt.zero_grad(set_to_none=True)
     loss.backward()
     if CFG["grad_clip"]:

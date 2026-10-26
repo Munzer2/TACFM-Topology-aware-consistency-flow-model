@@ -230,8 +230,11 @@ def sampler_pairs(steps_list=(4, 10), schedule="poly3"):
 
 def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev",
                self_correct=0.0, sc_start=(0.3, 0.95), sc_jump=(0.4, 0.9), alpha=None, sc_pairs=None,
-               self_cond=False, sc_prob=0.5):
-    """target='prev': EMA target at the noisier time t - delta (the original TACFM-D).
+               self_cond=False, sc_prob=0.5, delta_range=(0.1, 0.3)):
+    """delta_range: the gap between the student's time t and the EMA target's time is
+    delta ~ U[delta_range] (default 0.1-0.3, the original).
+
+    target='prev': EMA target at the noisier time t - delta (the original TACFM-D).
     target='next': EMA target at t + delta, closer to the data, as in Song et al.'s consistency
     models; where t + delta reaches 1 the target is the real graph (boundary condition).
 
@@ -258,7 +261,7 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
     B = x1.shape[0]
     u = torch.rand(B, layout.d, device=x1.device)
     t = torch.rand(B, 1, device=x1.device)
-    delta = torch.rand(B, 1, device=x1.device) * 0.2 + 0.1
+    delta = torch.rand(B, 1, device=x1.device) * (delta_range[1] - delta_range[0]) + delta_range[0]
     mask = layout.mask(n_nodes)
     if coupling:
         col = couple(u, x1, mask, p_slot, layout)
