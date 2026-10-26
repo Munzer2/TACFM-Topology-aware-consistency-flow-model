@@ -229,7 +229,8 @@ def sampler_pairs(steps_list=(4, 10), schedule="poly3"):
 
 
 def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev",
-               self_correct=0.0, sc_start=(0.3, 0.95), sc_jump=(0.4, 0.9), alpha=None, sc_pairs=None):
+               self_correct=0.0, sc_start=(0.3, 0.95), sc_jump=(0.4, 0.9), alpha=None, sc_pairs=None,
+               self_cond=False, sc_prob=0.5):
     """target='prev': EMA target at the noisier time t - delta (the original TACFM-D).
     target='next': EMA target at t + delta, closer to the data, as in Song et al.'s consistency
     models; where t + delta reaches 1 the target is the real graph (boundary condition).
@@ -246,7 +247,13 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
     At s = 0 the guess comes from pure noise and has nothing to do with the row's real graph, so
     for those rows the real graphs are re-paired to the guesses (Hungarian on sorted degree
     sequences, as in the coupling) and each guess is supervised toward the most similar real graph.
-    With self_correct=0 the computation is exactly the original one."""
+    With self_correct=0 the computation is exactly the original one.
+
+    self_cond (self-conditioning, needs a backbone built with self_cond=True): in a share sc_prob
+    of the rows the student gets its own no-grad prediction at x_t as an extra input; see below.
+    With self_cond=False the computation is exactly the original one."""
+    if self_cond and self_correct > 0:
+        raise NotImplementedError("self_cond together with self_correct is not supported")
     w_cons, w_anchor = loss_weights(lam, alpha)
     B = x1.shape[0]
     u = torch.rand(B, layout.d, device=x1.device)
@@ -263,9 +270,23 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
         x_t = sample_path(u, p0, x1, t)
         x_tgt = sample_path(u, p0, x1, t_tgt)
 
-        logits = student(x_t, t, n_nodes)
+        if not self_cond:
+            logits = student(x_t, t, n_nodes)
+            with torch.no_grad():
+                soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
+        else:
+            # Self-conditioning: in a share of the rows, first predict without a hint (no grad), then
+            # predict again with that prediction as the hint. Other rows get an all-zero hint, which
+            # is what the first sampling step sees. The EMA target is made the same way at x_tgt.
+            zeros = torch.zeros_like(x_t)
+            use = (torch.rand(B, 1, device=x1.device) < sc_prob).float()
+            with torch.no_grad():
+                hint = torch.sigmoid(student(x_t, t, n_nodes, prev=zeros)) * mask * use
+            logits = student(x_t, t, n_nodes, prev=hint)
+            with torch.no_grad():
+                hint_tgt = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes, prev=zeros)) * mask * use
+                soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes, prev=hint_tgt))
         with torch.no_grad():
-            soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
             if target == "next":
                 soft = torch.where(t_tgt >= 1.0, x1, soft)
         return w_cons * masked_bce(logits, soft, mask) + w_anchor * masked_bce(logits, x1, mask)
@@ -339,8 +360,10 @@ def _to_edges(A_hat, final, n_edges, mask):
 
 @torch.no_grad()
 def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=None, times=None,
-             renoise="soft", schedule="uniform"):
+             renoise="soft", schedule="uniform", self_cond=False):
     """n_nodes: (B,) node counts of the graphs to generate.
+    self_cond: pass the previous step's predicted probabilities to the model as its hint (all
+              zeros at the first step); needs a backbone built with self_cond=True.
     final:    how a prediction becomes edges -- 'threshold' (p > 0.5, the original),
               'sample' (Bernoulli(p)), or 'topk' (the n_edges[b] most likely slots).
     renoise:  what is re-noised between steps -- 'soft': the predicted probabilities (the original);
@@ -352,8 +375,14 @@ def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=N
     p0 = p_slot.unsqueeze(0) * mask
     x = (torch.rand_like(p0) < p0).float()
     ts = list(times) if times is not None else step_times(steps, schedule)
+    hint = torch.zeros_like(p0)
     for k, tv in enumerate(ts):
-        A_hat = torch.sigmoid(model(x, torch.full((x.shape[0], 1), float(tv), device=x.device), n_nodes)) * mask
+        t_in = torch.full((x.shape[0], 1), float(tv), device=x.device)
+        if self_cond:
+            A_hat = torch.sigmoid(model(x, t_in, n_nodes, prev=hint)) * mask
+            hint = A_hat
+        else:
+            A_hat = torch.sigmoid(model(x, t_in, n_nodes)) * mask
         if k == len(ts) - 1:
             x = _to_edges(A_hat, final, n_edges, mask)
         else:

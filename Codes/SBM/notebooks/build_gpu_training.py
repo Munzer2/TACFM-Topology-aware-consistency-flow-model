@@ -132,6 +132,7 @@ cells.append(md(r"""## B. Config
 Defaults reproduce DeFoG's Planar setup for everything that is not part of our method (network size, RRWP features, batch 64, AdamW lr 2e-4).
 
 - `target`: `"prev"` is the original TACFM-D (EMA target at the noisier time `t−δ`); `"next"` follows the original consistency-model recipe (target at `t+δ`, closer to the data).
+- `self_cond`: self-conditioning, i.e. the model also gets its previous prediction as an extra input (empty at the first sampling step). Test it with `sampler_aware_ab.ipynb` before training from scratch. The run folder gets `_sc` in its name.
 - `alpha`: the share of the loss given to "match the real graph" (the anchor). `None` uses `lam` the old way (`lam=3` = a 75% share). The literature (CDLM) uses 10–40%; test with `sampler_aware_ab.ipynb` first.
 - `final`: how the last prediction becomes edges. `"topk"` keeps the `m` most likely edges, with `m` taken from a training graph (fixes empty 1-step graphs on sparse data); `"threshold"` is the old `p > 0.5`; `"sample"` draws each edge.
 - `renoise`: between sampling steps, `"hard"` re-noises **one concrete graph** (the prediction turned into edges with the `final` rule), which matches training; `"soft"` re-noises the predicted probabilities (the original sampler). On Planar, `"hard"` is much better.
@@ -152,6 +153,7 @@ CFG = dict(
     lam=3.0,                   # weight of the BCE-to-real-graph term (used only when alpha is None)
     alpha=None,                # anchor share of the loss, 0..1: 4*((1-alpha)*consistency + alpha*anchor);
                                # 0.75 equals lam=3 exactly. None keeps consistency + lam * anchor
+    self_cond=False,           # self-conditioning: feed the previous prediction back as an extra edge input
     ema_target=0.995,          # EMA used as the consistency target
     ema_sample=0.9995,         # slower EMA used for sampling
     sample_with="ema_sample",  # "ema_sample" or "student"
@@ -183,7 +185,8 @@ if CFG["dataset"] == "sbm":
     CFG["batch_size"] = 32               # DeFoG's SBM batch size
 
 CFG["run_name"] = CFG["run_name"] or (f"{CFG['dataset']}_{CFG['backbone']}_{CFG['ordering']}_{CFG['prior']}_"
-                                      f"{'coup' if CFG['coupling'] else 'indep'}_{CFG['target']}_s{CFG['seed']}")
+                                      f"{'coup' if CFG['coupling'] else 'indep'}_{CFG['target']}"
+                                      f"{'_sc' if CFG['self_cond'] else ''}_s{CFG['seed']}")
 RUN_DIR = SBM_DIR / "results_spectre" / CFG["run_name"]
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print("run folder:", RUN_DIR)
@@ -234,7 +237,9 @@ cells.append(code(r"""from defog_nn import SlotGraphTransformer
 def build_model():
     if CFG["backbone"] == "transformer":
         return SlotGraphTransformer(N_MAX, CFG["n_layers"], CFG["hidden_mlp_dims"], CFG["hidden_dims"],
-                                    CFG["features"], CFG["rrwp_steps"], amp=CFG["amp"]).to(DEVICE)
+                                    CFG["features"], CFG["rrwp_steps"], amp=CFG["amp"],
+                                    self_cond=CFG["self_cond"]).to(DEVICE)
+    assert not CFG["self_cond"], "self-conditioning needs the transformer backbone"
     return GCNDiscrete(N_MAX).to(DEVICE)
 
 def frozen_copy(model):
@@ -268,7 +273,8 @@ def ema_update(ema, model, decay):
 def train_step():
     idx = torch.randint(len(x1_train), (CFG["batch_size"],), device=DEVICE)
     loss = batch_loss(student, ema_tgt, x1_train[idx], n_train[idx], p_slot, layout,
-                      coupling=CFG["coupling"], lam=CFG["lam"], target=CFG["target"], alpha=CFG["alpha"])
+                      coupling=CFG["coupling"], lam=CFG["lam"], target=CFG["target"], alpha=CFG["alpha"],
+                      self_cond=CFG["self_cond"])
     opt.zero_grad(set_to_none=True)
     loss.backward()
     if CFG["grad_clip"]:
@@ -329,7 +335,8 @@ def sample_graphs(model, num, steps, final=None, times=None):
     idx = torch.randint(len(n_train), (num,), device=DEVICE)
     n, m = n_train[idx], m_train[idx]
     x = generate(model, p_slot, n, layout, steps, final=final or CFG["final"], n_edges=m, times=times,
-                 renoise=CFG.get("renoise", "soft"), schedule=CFG.get("schedule", "uniform"))
+                 renoise=CFG.get("renoise", "soft"), schedule=CFG.get("schedule", "uniform"),
+                 self_cond=CFG["self_cond"])
     return slots_to_graphs(x, n, layout)
 
 def score(gen, split):
