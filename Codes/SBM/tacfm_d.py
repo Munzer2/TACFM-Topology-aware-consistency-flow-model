@@ -203,10 +203,58 @@ def masked_bce(logits, target, mask):
     return (F.binary_cross_entropy_with_logits(logits, target, reduction="none") * mask).sum() / mask.sum()
 
 
-def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev"):
+def rowwise_bce(logits, target, mask):
+    return (F.binary_cross_entropy_with_logits(logits, target, reduction="none") * mask).sum(1) / mask.sum(1).clamp(min=1.0)
+
+
+ANCHOR_SCALE = 4.0   # total loss weight when the anchor is given as a share alpha (alpha=0.75 -> 1*cons + 3*anchor)
+
+
+def loss_weights(lam=3.0, alpha=None):
+    """(consistency weight, anchor weight). With alpha (the anchor's share of the loss, 0..1) the
+    weights are ANCHOR_SCALE * (1 - alpha, alpha), so alpha=0.75 equals the original lam=3 exactly
+    and every alpha keeps the same total weight. Without alpha: (1, lam), the original form."""
+    if alpha is None:
+        return 1.0, lam
+    return ANCHOR_SCALE * (1.0 - alpha), ANCHOR_SCALE * alpha
+
+
+def sampler_pairs(steps_list=(4, 10), schedule="poly3"):
+    """Consecutive (s, t) step-time pairs the sampler visits, e.g. K=4 poly3: (0, .578), (.578, .875), (.875, .984)."""
+    pairs = []
+    for K in steps_list:
+        ts = step_times(K, schedule)
+        pairs += list(zip(ts[:-1], ts[1:]))
+    return torch.tensor(pairs, dtype=torch.float32)
+
+
+def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0, target="prev",
+               self_correct=0.0, sc_start=(0.3, 0.95), sc_jump=(0.4, 0.9), alpha=None, sc_pairs=None,
+               self_cond=False, sc_prob=0.5):
     """target='prev': EMA target at the noisier time t - delta (the original TACFM-D).
     target='next': EMA target at t + delta, closer to the data, as in Song et al.'s consistency
-    models; where t + delta reaches 1 the target is the real graph (boundary condition)."""
+    models; where t + delta reaches 1 the target is the real graph (boundary condition).
+
+    alpha: the anchor's share of the loss (see loss_weights); None keeps the original cons + lam * anchor.
+
+    self_correct (sampler-aware training): the fraction of the batch trained on the input the
+    sampler actually produces. For those rows:
+        v1 (sc_pairs=None): s ~ U[sc_start], t = s + (1 - s) * U[sc_jump]
+        v2 (sc_pairs = sampler_pairs(...)): (s, t) is one of the sampler's own consecutive step
+            times, including s = 0
+        x_s = real graph noised to s;  guess = top-k of EMA(x_s, s)   (no grad)
+        x_t = the GUESS noised to t;  loss = anchor weight * BCE(student(x_t, t), target graph)
+    At s = 0 the guess comes from pure noise and has nothing to do with the row's real graph, so
+    for those rows the real graphs are re-paired to the guesses (Hungarian on sorted degree
+    sequences, as in the coupling) and each guess is supervised toward the most similar real graph.
+    With self_correct=0 the computation is exactly the original one.
+
+    self_cond (self-conditioning, needs a backbone built with self_cond=True): in a share sc_prob
+    of the rows the student gets its own no-grad prediction at x_t as an extra input; see below.
+    With self_cond=False the computation is exactly the original one."""
+    if self_cond and self_correct > 0:
+        raise NotImplementedError("self_cond together with self_correct is not supported")
+    w_cons, w_anchor = loss_weights(lam, alpha)
     B = x1.shape[0]
     u = torch.rand(B, layout.d, device=x1.device)
     t = torch.rand(B, 1, device=x1.device)
@@ -216,8 +264,58 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
         col = couple(u, x1, mask, p_slot, layout)
         x1, mask, n_nodes = x1[col], mask[col], n_nodes[col]
     p0 = p_slot.unsqueeze(0) * mask
+
+    if self_correct <= 0:
+        t_tgt = (t - delta).clamp(min=0.0) if target == "prev" else (t + delta).clamp(max=1.0)
+        x_t = sample_path(u, p0, x1, t)
+        x_tgt = sample_path(u, p0, x1, t_tgt)
+
+        if not self_cond:
+            logits = student(x_t, t, n_nodes)
+            with torch.no_grad():
+                soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
+        else:
+            # Self-conditioning: in a share of the rows, first predict without a hint (no grad), then
+            # predict again with that prediction as the hint. Other rows get an all-zero hint, which
+            # is what the first sampling step sees. The EMA target is made the same way at x_tgt.
+            zeros = torch.zeros_like(x_t)
+            use = (torch.rand(B, 1, device=x1.device) < sc_prob).float()
+            with torch.no_grad():
+                hint = torch.sigmoid(student(x_t, t, n_nodes, prev=zeros)) * mask * use
+            logits = student(x_t, t, n_nodes, prev=hint)
+            with torch.no_grad():
+                hint_tgt = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes, prev=zeros)) * mask * use
+                soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes, prev=hint_tgt))
+        with torch.no_grad():
+            if target == "next":
+                soft = torch.where(t_tgt >= 1.0, x1, soft)
+        return w_cons * masked_bce(logits, soft, mask) + w_anchor * masked_bce(logits, x1, mask)
+
+    # ---- sampler-aware rows ----
+    dev = x1.device
+    sc = torch.rand(B, device=dev) < self_correct
+    if sc_pairs is None:                                   # v1: continuous ranges
+        s = sc_start[0] + (sc_start[1] - sc_start[0]) * torch.rand(B, 1, device=dev)
+        t_sc = s + (1 - s) * (sc_jump[0] + (sc_jump[1] - sc_jump[0]) * torch.rand(B, 1, device=dev))
+    else:                                                  # v2: the sampler's own step pairs
+        pr = sc_pairs.to(dev)[torch.randint(len(sc_pairs), (B,), device=dev)]
+        s, t_sc = pr[:, :1], pr[:, 1:]
+    t = torch.where(sc.unsqueeze(1), t_sc, t)
+    with torch.no_grad():
+        x_s = sample_path(torch.rand_like(x1), p0, x1, s)
+        guess = top_k_slots(torch.sigmoid(ema(x_s, s, n_nodes)) * mask, x1.sum(1).long(), mask)
+        z = (sc & (s.squeeze(1) == 0)).nonzero().squeeze(1)    # guesses made from pure noise
+        if len(z) > 1:
+            f_g = torch.sort(layout.degrees(guess[z]), dim=1).values
+            f_1 = torch.sort(layout.degrees(x1[z]), dim=1).values
+            cost = torch.cdist(f_g, f_1, p=1) + 1e6 * (n_nodes[z].view(-1, 1) != n_nodes[z].view(1, -1)).float()
+            _, col = linear_sum_assignment(cost.cpu().numpy())
+            x1 = x1.clone()
+            x1[z] = x1[z][torch.as_tensor(col, device=dev)]     # same node count, so the mask is unchanged
+    source = torch.where(sc.unsqueeze(1), guess, x1)       # what gets noised to time t
+
     t_tgt = (t - delta).clamp(min=0.0) if target == "prev" else (t + delta).clamp(max=1.0)
-    x_t = sample_path(u, p0, x1, t)
+    x_t = sample_path(u, p0, source, t)
     x_tgt = sample_path(u, p0, x1, t_tgt)
 
     logits = student(x_t, t, n_nodes)
@@ -225,7 +323,9 @@ def batch_loss(student, ema, x1, n_nodes, p_slot, layout, coupling=True, lam=3.0
         soft = torch.sigmoid(ema(x_tgt, t_tgt, n_nodes))
         if target == "next":
             soft = torch.where(t_tgt >= 1.0, x1, soft)
-    return masked_bce(logits, soft, mask) + lam * masked_bce(logits, x1, mask)
+    consistency = rowwise_bce(logits, soft, mask) * (~sc).float()   # only for the ordinary rows
+    denoise = rowwise_bce(logits, x1, mask)
+    return (w_cons * consistency + w_anchor * denoise).mean()
 
 
 def top_k_slots(scores, k, mask):
@@ -260,8 +360,10 @@ def _to_edges(A_hat, final, n_edges, mask):
 
 @torch.no_grad()
 def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=None, times=None,
-             renoise="soft", schedule="uniform"):
+             renoise="soft", schedule="uniform", self_cond=False):
     """n_nodes: (B,) node counts of the graphs to generate.
+    self_cond: pass the previous step's predicted probabilities to the model as its hint (all
+              zeros at the first step); needs a backbone built with self_cond=True.
     final:    how a prediction becomes edges -- 'threshold' (p > 0.5, the original),
               'sample' (Bernoulli(p)), or 'topk' (the n_edges[b] most likely slots).
     renoise:  what is re-noised between steps -- 'soft': the predicted probabilities (the original);
@@ -273,8 +375,14 @@ def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=N
     p0 = p_slot.unsqueeze(0) * mask
     x = (torch.rand_like(p0) < p0).float()
     ts = list(times) if times is not None else step_times(steps, schedule)
+    hint = torch.zeros_like(p0)
     for k, tv in enumerate(ts):
-        A_hat = torch.sigmoid(model(x, torch.full((x.shape[0], 1), float(tv), device=x.device), n_nodes)) * mask
+        t_in = torch.full((x.shape[0], 1), float(tv), device=x.device)
+        if self_cond:
+            A_hat = torch.sigmoid(model(x, t_in, n_nodes, prev=hint)) * mask
+            hint = A_hat
+        else:
+            A_hat = torch.sigmoid(model(x, t_in, n_nodes)) * mask
         if k == len(ts) - 1:
             x = _to_edges(A_hat, final, n_edges, mask)
         else:

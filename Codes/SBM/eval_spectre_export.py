@@ -63,7 +63,8 @@ def main():
 
     if cfg["backbone"] == "transformer":
         model = SlotGraphTransformer(ex["n_max"], cfg["n_layers"], cfg["hidden_mlp_dims"], cfg["hidden_dims"],
-                                     cfg["features"], cfg["rrwp_steps"], amp=False)
+                                     cfg["features"], cfg["rrwp_steps"], amp=False,
+                                     self_cond=cfg.get("self_cond", False))
     else:
         model = GCNDiscrete(ex["n_max"])
     model.load_state_dict({k: v.float() if v.is_floating_point() else v for k, v in ex["weights"].items()})
@@ -85,7 +86,8 @@ def main():
             torch.manual_seed(1000 + r)
             idx = torch.randint(len(n_train), (args.num_samples,), device=device)
             n, m = n_train[idx], m_train[idx]
-            x = generate(model, p_slot, n, layout, steps, final=final, n_edges=m, renoise=renoise, schedule=schedule)
+            x = generate(model, p_slot, n, layout, steps, final=final, n_edges=m, renoise=renoise, schedule=schedule,
+                         self_cond=cfg.get("self_cond", False))
             gen = slots_to_graphs(x, n, layout)
             out = mmd_metrics(test_g, gen, keys)
             out.update(ratios(out, ref))
