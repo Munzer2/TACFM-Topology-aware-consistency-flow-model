@@ -1,0 +1,135 @@
+{
+ "export": "results_spectre/ab_self_cond/target_next/export_target_next.pt",
+ "num": 80,
+ "configs": {
+  "ours": {
+   "kind": "ours",
+   "same_u": false
+  },
+  "ours_same_u": {
+   "kind": "ours",
+   "same_u": true
+  },
+  "ours_uniform": {
+   "kind": "ours",
+   "same_u": false,
+   "schedule": "uniform"
+  },
+  "defog_plain": {
+   "kind": "defog",
+   "eta": 0.0,
+   "omega": 0.0,
+   "distortion": "identity",
+   "final": "sample"
+  },
+  "defog_polydec": {
+   "kind": "defog",
+   "eta": 0.0,
+   "omega": 0.0,
+   "distortion": "polydec",
+   "final": "sample"
+  },
+  "defog_planar": {
+   "kind": "defog",
+   "eta": 50.0,
+   "omega": 0.05,
+   "distortion": "polydec",
+   "final": "sample"
+  },
+  "defog_planar_topk": {
+   "kind": "defog",
+   "eta": 50.0,
+   "omega": 0.05,
+   "distortion": "polydec",
+   "final": "topk"
+  },
+  "defog_tg": {
+   "kind": "defog",
+   "eta": 0.0,
+   "omega": 0.5,
+   "distortion": "polydec",
+   "final": "sample"
+  },
+  "defog_tg_eta": {
+   "kind": "defog",
+   "eta": 10.0,
+   "omega": 0.5,
+   "distortion": "polydec",
+   "final": "sample"
+  }
+ },
+ "results": {
+  "ours@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.1875,
+   "vun": 0.1875,
+   "edges": 178.275
+  },
+  "ours_same_u@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.3125,
+   "vun": 0.3125,
+   "edges": 177.95
+  },
+  "ours_uniform@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0,
+   "vun": 0.0,
+   "edges": 178.275
+  },
+  "defog_plain@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0,
+   "vun": 0.0,
+   "edges": 177.1375
+  },
+  "defog_polydec@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0125,
+   "vun": 0.0125,
+   "edges": 178.2125
+  },
+  "defog_planar@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0,
+   "vun": 0.0,
+   "edges": 174.825
+  },
+  "defog_planar_topk@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0,
+   "vun": 0.0,
+   "edges": 178.3875
+  },
+  "defog_tg@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.1,
+   "vun": 0.1,
+   "edges": 176.975
+  },
+  "defog_tg_eta@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.0,
+   "vun": 0.0,
+   "edges": 176.2625
+  }
+ }
+}

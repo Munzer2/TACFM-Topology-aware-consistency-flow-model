@@ -1,0 +1,59 @@
+{
+ "export": "results_spectre/ab_self_cond/target_next/export_target_next.pt",
+ "num": 120,
+ "configs": {
+  "ours_same_u": {
+   "kind": "ours",
+   "same_u": true
+  },
+  "ours_same_u_poly2": {
+   "kind": "ours",
+   "same_u": true,
+   "schedule": "poly2"
+  },
+  "ours_same_u_poly4": {
+   "kind": "ours",
+   "same_u": true,
+   "schedule": "poly4"
+  },
+  "ours_same_u_poly5": {
+   "kind": "ours",
+   "same_u": true,
+   "schedule": "poly5"
+  }
+ },
+ "results": {
+  "ours_same_u@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.31666666666666665,
+   "vun": 0.31666666666666665,
+   "edges": 177.81666666666666
+  },
+  "ours_same_u_poly2@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.16666666666666666,
+   "vun": 0.16666666666666666,
+   "edges": 177.81666666666666
+  },
+  "ours_same_u_poly4@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.30833333333333335,
+   "vun": 0.30833333333333335,
+   "edges": 177.81666666666666
+  },
+  "ours_same_u_poly5@10": {
+   "unique": 1.0,
+   "unique_novel": 1.0,
+   "novel": 1.0,
+   "valid": 0.35833333333333334,
+   "vun": 0.35833333333333334,
+   "edges": 177.81666666666666
+  }
+ }
+}

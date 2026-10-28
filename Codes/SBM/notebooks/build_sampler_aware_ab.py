@@ -83,6 +83,7 @@ cells.append(code(r"""CFG = dict(
     ema_sample=0.999,          # sampling EMA (shorter than the base run's 0.9995, to fit 5k steps)
     sc_prob=0.5,               # self-conditioning: share of rows that get their own first prediction as the hint
     delta_range=(0.1, 0.3),    # gap between the student's time and the EMA target's time (the original range)
+    same_u=True,               # sampler: re-noise with the same u at every step (better than fresh noise)
     eval_steps=[4, 10, 20],    # sampling step counts scored on the test set
     num_samples=40,
     final_runs=5,
@@ -195,6 +196,7 @@ def test_table(model, self_cond=False):
             n, m = n_train[idx], m_train[idx]
             x = generate(model, p_slot, n, layout, steps, final=BASE["final"], n_edges=m,
                          renoise=BASE.get("renoise", "hard"), schedule=BASE.get("schedule", "poly3"),
+                         same_u=CFG.get("same_u", False),
                          self_cond=self_cond)
             gen = slots_to_graphs(x, n, layout)
             out = mmd_metrics(test_g, gen)

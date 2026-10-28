@@ -175,6 +175,8 @@ CFG = dict(
     final="topk",              # "topk", "threshold", "sample"
     renoise="hard",            # between steps, re-noise one concrete graph ("hard") or the probabilities ("soft")
     schedule="poly3",          # step times: "uniform" or "polyP" (packed toward t = 1)
+    same_u=True,               # re-noise with the same uniform draw u at every step (stays on the trained
+                               # shared-u path; 10-step V.U.N. 29.5% vs 21.0% with fresh noise, 2026-10-28)
     num_samples=40,            # graphs per evaluation (DeFoG: 40)
     final_runs=5,              # test runs for the final table (DeFoG: 5)
     orbit=True,                # orbit MMD needs the ORCA binary
@@ -338,6 +340,7 @@ def sample_graphs(model, num, steps, final=None, times=None):
     n, m = n_train[idx], m_train[idx]
     x = generate(model, p_slot, n, layout, steps, final=final or CFG["final"], n_edges=m, times=times,
                  renoise=CFG.get("renoise", "soft"), schedule=CFG.get("schedule", "uniform"),
+                 same_u=CFG.get("same_u", False),
                  self_cond=CFG["self_cond"])
     return slots_to_graphs(x, n, layout)
 

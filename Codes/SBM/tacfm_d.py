@@ -363,8 +363,10 @@ def _to_edges(A_hat, final, n_edges, mask):
 
 @torch.no_grad()
 def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=None, times=None,
-             renoise="soft", schedule="uniform", self_cond=False):
+             renoise="soft", schedule="uniform", self_cond=False, same_u=False):
     """n_nodes: (B,) node counts of the graphs to generate.
+    same_u:   re-noise with the SAME uniform draw u at every step (x_s = 1[u < (1-s) p0 + s target]),
+              i.e. stay on the shared-u trajectory the model was trained on; False draws fresh noise.
     self_cond: pass the previous step's predicted probabilities to the model as its hint (all
               zeros at the first step); needs a backbone built with self_cond=True.
     final:    how a prediction becomes edges -- 'threshold' (p > 0.5, the original),
@@ -376,7 +378,8 @@ def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=N
     model.eval()
     mask = layout.mask(n_nodes)
     p0 = p_slot.unsqueeze(0) * mask
-    x = (torch.rand_like(p0) < p0).float()
+    u0 = torch.rand_like(p0)
+    x = (u0 < p0).float()
     ts = list(times) if times is not None else step_times(steps, schedule)
     hint = torch.zeros_like(p0)
     for k, tv in enumerate(ts):
@@ -391,6 +394,57 @@ def generate(model, p_slot, n_nodes, layout, steps, final="threshold", n_edges=N
         else:
             t_next = float(ts[k + 1])
             target = _to_edges(A_hat, final, n_edges, mask) if renoise == "hard" else A_hat
-            x = (torch.rand_like(A_hat) < (1 - t_next) * p0 + t_next * target).float()
+            u = u0 if same_u else torch.rand_like(A_hat)
+            x = (u < (1 - t_next) * p0 + t_next * target).float()
+    model.train()
+    return x
+
+
+def distort_time(t, kind="identity"):
+    """DeFoG's time distortions (src/flow_matching/time_distorter.py)."""
+    if kind == "identity":
+        return t
+    if kind == "polydec":
+        return 2 * t - t ** 2
+    if kind == "polyinc":
+        return t ** 2
+    if kind == "cos":
+        return (1 - torch.cos(t * torch.pi)) / 2
+    raise ValueError(kind)
+
+
+@torch.no_grad()
+def generate_defog(model, p_slot, n_nodes, layout, steps, eta=0.0, omega=0.0, distortion="identity",
+                   final="sample", n_edges=None):
+    """DeFoG's CTMC sampler (Qin et al. 2025; src/graph_discrete_flow_model.py + rate_matrix.py),
+    specialised to binary edges on the linear path p_t(z | x1) = t 1[z = x1] + (1 - t) p0(z) with
+    our per-slot prior p0. Each step: predict p(x1 | x_t); draw x1_hat ~ Bernoulli; build the rate
+    of flipping the current state, R = R* + R_db (eta) + R_tg (omega); flip with prob min(1, R dt).
+      R*    = 1 / (1 - t) if x_t != x1_hat else 0                       (DFM conditional rate)
+      R_tg  = omega / (Z p_t(x_t | x1_hat)) if x_t != x1_hat             (target guidance), Z = 2
+      R_db  = eta * p_t(1 - x_t | x1_hat)                                ('general' detailed balance)
+    Unlike our predict-and-re-noise sampler, the current graph is KEPT and only edited. The last
+    step (s = 1) samples from the prediction ('sample', as DeFoG) or takes its top-k ('topk')."""
+    model.eval()
+    mask = layout.mask(n_nodes)
+    p0 = (p_slot.unsqueeze(0) * mask).clamp(1e-6, 1 - 1e-6)
+    x = (torch.rand_like(p0) < p0).float() * mask
+    grid = torch.linspace(0.0, 1.0, steps + 1)
+    for k in range(steps):
+        t = float(distort_time(grid[k], distortion))
+        s = float(distort_time(grid[k + 1], distortion))
+        P = torch.sigmoid(model(x, torch.full((x.shape[0], 1), t, device=x.device), n_nodes)) * mask
+        if k == steps - 1:
+            x = _to_edges(P, final, n_edges, mask)
+            break
+        x1_hat = (torch.rand_like(P) < P).float()
+        p_xt = torch.where(x == x1_hat, t + (1 - t) * torch.where(x1_hat == 1, p0, 1 - p0),
+                           (1 - t) * torch.where(x == 1, p0, 1 - p0))          # p_t(x_t | x1_hat)
+        p_other = 1 - p_xt                                                       # p_t(1 - x_t | x1_hat)
+        differ = (x != x1_hat).float()
+        R = differ / (1 - t) + differ * omega / (2 * p_xt) + eta * p_other
+        R = torch.nan_to_num(R, nan=0.0, posinf=0.0)
+        flip = torch.rand_like(P) < (R * (s - t)).clamp(max=1.0)
+        x = torch.where(flip, 1 - x, x) * mask
     model.train()
     return x
