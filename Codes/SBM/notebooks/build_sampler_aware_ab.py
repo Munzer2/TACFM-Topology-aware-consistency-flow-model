@@ -13,7 +13,9 @@ cells.append(md(r"""# Short A/B test: how much weight should the anchor get?
 
 **Question.** The loss has two parts: the **consistency** term (match the EMA model's prediction from a cleaner point on the same path) and the **anchor** (match the real graph). Every run so far gave the anchor **75%** of the loss (α = 0.75, the old λ = 3). The literature uses 10–40% (CDLM) up to about 75% (Categorical Flow Maps). And **α = 1.0 switches the consistency term off**, which shows whether it helps at all.
 
-**Design.** Four 5k-step fine-tunes from the **same starting weights** (the finished `prev` run), all with `target="next"` (the change that helped so far), differing only in α:
+**Design.** Four 5k-step runs, all with `target="next"`, differing only in α. With `from_scratch=True` (the default now) every arm starts from the **same random initialisation** (same seed) and uses the base run's learning rate and warmup. With `from_scratch=False` every arm is a fine-tune from the finished `prev` run instead (the earlier test, 2026-10-29: all α equal).
+
+5k steps from scratch is early: expect low V.U.N. for every arm, so compare the MMDs, the average ratio and the training loss as well as V.U.N.
 
 | Arm | α (anchor share) | What it tells us |
 |---|---|---|
@@ -71,11 +73,14 @@ cells.append(md(r"""## B. Config
 """))
 
 cells.append(code(r"""CFG = dict(
-    init_from="results_spectre/planar_transformer_bfs_slot_coup_prev_s0/export_last.pt",
+    init_from="results_spectre/planar_transformer_bfs_slot_coup_prev_s0/export_last.pt",  # config (and weights unless from_scratch)
+    from_scratch=True,         # True: random init (same seed for every arm); False: fine-tune from init_from's weights
     steps=5_000,               # fine-tuning steps per arm
     batch_size=64,
-    lr=1e-4,                   # peak learning rate of the fine-tune (the base run peaked at 2e-4)
+    lr=1e-4,                   # peak learning rate of a fine-tune (the base run peaked at 2e-4)
     warmup_steps=200,
+    scratch_lr=2e-4,           # from scratch: the base run's peak learning rate ...
+    scratch_warmup_steps=1000, # ... and warmup
     weight_decay=1e-12,
     grad_clip=1.0,
     amp=True,
@@ -88,7 +93,7 @@ cells.append(code(r"""CFG = dict(
     num_samples=40,
     final_runs=5,
     seed=0,
-    out_dir="results_spectre/ab_alpha",
+    out_dir="results_spectre/ab_alpha_scratch",
 )
 # Each arm = overrides of the base run's training settings. Delete entries to run fewer arms.
 ARMS = {
@@ -102,7 +107,12 @@ init = torch.load(SBM_DIR / CFG["init_from"], map_location="cpu", weights_only=F
 BASE = init["cfg"]
 OUT = SBM_DIR / CFG["out_dir"]
 OUT.mkdir(parents=True, exist_ok=True)
-print(f"starting weights: {CFG['init_from']}  (trained {init['step']:,} steps)")
+if CFG["from_scratch"]:
+    CFG["lr"], CFG["warmup_steps"] = CFG["scratch_lr"], CFG["scratch_warmup_steps"]
+    print(f"FROM SCRATCH: random init (seed {CFG['seed']}), lr {CFG['lr']}, warmup {CFG['warmup_steps']}; "
+          f"config from {CFG['init_from']}")
+else:
+    print(f"starting weights: {CFG['init_from']}  (trained {init['step']:,} steps)")
 print({k: BASE[k] for k in ("dataset", "ordering", "prior", "coupling", "target", "lam", "final", "renoise", "schedule")})
 """))
 
@@ -119,14 +129,18 @@ p_slot = edge_prior(x1_train, layout.mask(n_train), BASE["prior"])
 INIT_WEIGHTS = {k: (v.float() if v.is_floating_point() else v) for k, v in init["weights"].items()}
 
 def build_model(self_cond=False):
+    if CFG["from_scratch"]:
+        torch.manual_seed(CFG["seed"])         # the same random initialisation for every arm
     if BASE["backbone"] == "transformer":
         m = SlotGraphTransformer(N_MAX, BASE["n_layers"], BASE["hidden_mlp_dims"], BASE["hidden_dims"],
                                  BASE["features"], BASE["rrwp_steps"], amp=CFG["amp"], self_cond=self_cond)
-        m.load_base_weights(INIT_WEIGHTS)      # a new self-conditioning channel starts at zero
+        if not CFG["from_scratch"]:
+            m.load_base_weights(INIT_WEIGHTS)  # a new self-conditioning channel starts at zero
     else:
         assert not self_cond, "self-conditioning needs the transformer backbone"
         m = GCNDiscrete(N_MAX)
-        m.load_state_dict(INIT_WEIGHTS)
+        if not CFG["from_scratch"]:
+            m.load_state_dict(INIT_WEIGHTS)
     return m.to(DEVICE)
 
 def frozen_copy(model):
@@ -342,7 +356,7 @@ for name in ["start", *ARMS]:
 
 cells.append(md(r"""## H. How to read it, and what to push
 
-Compare every arm with **`next_alpha_0.75`** (today's setting; same fine-tune and starting weights, only α differs). With 200 test graphs per step count, a V.U.N. gap of about 8 points or more is unlikely to be chance.
+Compare every arm with **`next_alpha_0.75`** (today's setting; same training and starting point, only α differs). For the from-scratch run, `start` is the random initialisation, so its scores are meaningless. With 200 test graphs per step count, a V.U.N. gap of about 8 points or more is unlikely to be chance.
 
 - **A lower α helps** if `next_alpha_0.5` or `next_alpha_0.3` has **higher V.U.N. at 10 and 20 steps** than `next_alpha_0.75` without worse MMDs. Then the next from-scratch run should use that α.
 - **`next_alpha_1.0` (consistency off) is the key result for the paper:**
@@ -354,7 +368,7 @@ Compare every arm with **`next_alpha_0.75`** (today's setting; same fine-tune an
 **Push the results** (small files) from the repository root:
 
 ```bash
-git add Codes/SBM/results_spectre/ab_alpha/ab_results.json Codes/SBM/results_spectre/ab_alpha/*/export_*.pt
+git add Codes/SBM/results_spectre/ab_alpha_scratch/ab_results.json Codes/SBM/results_spectre/ab_alpha_scratch/*/export_*.pt
 ```
 
 ```bash
