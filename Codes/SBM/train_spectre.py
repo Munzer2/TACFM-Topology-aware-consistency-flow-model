@@ -68,6 +68,8 @@ def main():
     p.add_argument("--lr", type=float, default=5e-4)
     p.add_argument("--ema", type=float, default=0.995)
     p.add_argument("--lam", type=float, default=3.0)
+    p.add_argument("--t_dist", choices=["uniform", "polydec", "late_mix"], default="uniform",
+                   help="training-time distribution of t (see tacfm_d.train_times)")
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--layers", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
@@ -81,6 +83,8 @@ def main():
     args = p.parse_args()
 
     tag = f"{args.dataset}_{args.ordering}_{args.prior}_{args.coupling}_s{args.seed}"
+    if args.t_dist != "uniform":
+        tag += f"_t{args.t_dist}"
     out_dir = args.out or os.path.join("results_spectre", tag)
     os.makedirs(out_dir, exist_ok=True)
     check_validity = not args.no_validity
@@ -118,7 +122,8 @@ def main():
         running, nb = 0.0, 0
         for k in range(0, len(perm), args.batch_size):
             b = perm[k:k + args.batch_size]
-            loss = batch_loss(student, ema, x1_train[b], n_train[b], p_slot, layout, coupling, args.lam)
+            loss = batch_loss(student, ema, x1_train[b], n_train[b], p_slot, layout, coupling, args.lam,
+                              t_dist=args.t_dist)
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)

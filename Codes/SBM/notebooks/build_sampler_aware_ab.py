@@ -96,6 +96,7 @@ cells.append(code(r"""CFG = dict(
     out_dir="results_spectre/ab_alpha_scratch",
 )
 # Each arm = overrides of the base run's training settings. Delete entries to run fewer arms.
+# Overrides: target, alpha, self_cond, delta_range, t_dist ("uniform" / "polydec" / "late_mix").
 ARMS = {
     "next_alpha_0.75": {"target": "next", "alpha": 0.75},
     "next_alpha_0.5":  {"target": "next", "alpha": 0.5},
@@ -304,7 +305,8 @@ def finetune(arm, ov):
                               target=ov.get("target", BASE["target"]),
                               alpha=ov.get("alpha", BASE.get("alpha")),
                               self_cond=ov.get("self_cond", False), sc_prob=CFG["sc_prob"],
-                              delta_range=tuple(ov.get("delta_range", CFG["delta_range"])))
+                              delta_range=tuple(ov.get("delta_range", CFG["delta_range"])),
+                              t_dist=ov.get("t_dist", "uniform"))
             opt.zero_grad(set_to_none=True); loss.backward()
             torch.nn.utils.clip_grad_norm_(student.parameters(), CFG["grad_clip"])
             opt.step(); sched.step()
@@ -319,7 +321,7 @@ def finetune(arm, ov):
     except KeyboardInterrupt:
         save(last_path); print(f"[{arm}] interrupted: saved step {step:,}. Rerun to continue."); raise
     save(done_path)
-    atomic_save({"cfg": {**BASE, **{k: v for k, v in ov.items() if k in ("target", "alpha", "self_cond")},
+    atomic_save({"cfg": {**BASE, **{k: v for k, v in ov.items() if k in ("target", "alpha", "self_cond", "t_dist")},
                          **{"finetune": CFG, "arm": arm, "overrides": ov}}, "n_max": N_MAX, "step": init["step"] + step,
                  "best_step": None, "val": None,
                  "weights": {k: (v.half() if v.is_floating_point() else v) for k, v in ema_smp.state_dict().items()}},
